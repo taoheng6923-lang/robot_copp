@@ -3,47 +3,76 @@
 论文 **TOTP-SPLP**（分段线性目标 PLP + 序列线性化 + LP）的最小可运行内核。
 对应 [`python_framework.md`](./python_framework.md) §9 里程碑 M1 与 [`robot_copp_design.md`](./robot_copp_design.md) §7。
 
+> **顶层模块划分**（与 `python_framework.md` §2 描述的单包结构不同，实际实现按职责拆分）：
+> - 顶层 `robot/` —— 机器人运动学/动力学本体（FK/IK/Jacobian/逆动力学），独立于其余三者
+> - `trajectory-planning/`（纯目录容器，非 Python 包）下：
+>   - `copp/` —— 纯 TOTP-SPLP 数值求解核心（types/options/constraints/solve/backend），不依赖 robot/path
+>   - `path/` —— 路径构造（commands/blending/lowering，M2/M3，尚未实现）
+>   - `planner/` —— 调度/合成/门面（hlaw/synth/planner.py，M2+/M5，尚未实现）
+>
+> 三者（`path`/`copp`/`planner`）+ 顶层 `robot` 经 `trajectory-planning/planner/planner.py`
+> 编排串联；`copp/` 只通过 `PathDerivatives`/`Topp3Data` 这类数据结构与 path/robot 交互，
+> 不做反向导入。`trajectory-planning` 本身不是 Python 包（无 `__init__.py`，含连字符不可作为
+> 模块名），只是把 `path`/`copp`/`planner` 三个顶层包归到一处的目录；本地开发经
+> `pyproject.toml` 的 `[tool.pytest.ini_options] pythonpath` 把它加入 `sys.path`。
+
 ## 已实现（M1 范围）
 
-`types` + `solve/` + `backend/cvxpy_backend`：
+`copp/{types,solve,backend/cvxpy_backend}` + `robot/{base,ur5}`：
 
 | 模块 | 内容 | 论文/设计对应 |
 |------|------|---------------|
-| `types.py` | `Topp3Data`（轴向约束输入）/ `Profile(a,b,c)` | framework §4 |
-| `solve/state.py` | 梯形动力学、速度上界 ā、时间权重 | Prop.1 / 设计 §7.1 |
-| `solve/seed.py` | 种子 a⁽⁰⁾（2 阶 LP，= topp2_ra 角色） | 论文 §5.1 |
-| `solve/linearize.py` | jerk 凹约束切线线性化 | 论文 **eq.32** |
-| `solve/plp_objective.py` | PLP 割线上包络 + 辅助变量 J_k + 下界 a≥δ0 | 论文 **eq.27 / 29d / Prop.3** |
-| `solve/lp_problem.py` | 单次 PLP-LP 组装（cvxpy） | 论文式 29 |
-| `solve/splp.py` | Algorithm 2 迭代（eq.30 停止） | 论文 **Algorithm 2** |
-| `solve/interp.py` | 解析插值 s↔t（含 Prop.2 静止段） | Prop.1 / **Prop.2** |
-| `config.py` | 从 YAML 加载机器人逐关节约束 → `RobotLimits` | framework §5.5 |
-| `robot/base.py` | `KinematicsModel` / `DynamicsModel` 协议（M2 目标接口） | framework §5.1 |
-| `robot/synthetic.py` | `SyntheticRobotModel`（M1 stand-in：解析 TCP 路径 + 对角惯性动力学） | framework §5.1 |
-| `backend/cvxpy_backend.py` | CLARABEL 求解 | framework §5.9 |
-| `viz.py` | 结果可视化（2×3 概览图，可选 matplotlib） | framework §5.8 |
+| `copp/types.py` | `Topp3Data`（轴向约束输入）/ `Profile(a,b,c)` | framework §4 |
+| `copp/solve/state.py` | 梯形动力学、速度上界 ā、时间权重 | Prop.1 / 设计 §7.1 |
+| `copp/solve/seed.py` | 种子 a⁽⁰⁾（2 阶 LP，= topp2_ra 角色） | 论文 §5.1 |
+| `copp/solve/linearize.py` | jerk 凹约束切线线性化 | 论文 **eq.32** |
+| `copp/solve/plp_objective.py` | PLP 割线上包络 + 辅助变量 J_k + 下界 a≥δ0 | 论文 **eq.27 / 29d / Prop.3** |
+| `copp/solve/lp_problem.py` | 单次 PLP-LP 组装（cvxpy） | 论文式 29 |
+| `copp/solve/splp.py` | Algorithm 2 迭代（eq.30 停止） | 论文 **Algorithm 2** |
+| `copp/solve/interp.py` | 解析插值 s↔t（含 Prop.2 静止段） | Prop.1 / **Prop.2** |
+| `copp/constraints/model.py` | `RobotLimits`（机器人本体约束配置 → `Topp3Data`） | framework §5.5 |
+| `copp/constraints/ingest.py` | TCP 速度模上界、关节力矩约束行（M4） | framework §5.5 / 设计 §6 |
+| `copp/options.py` | `ConstraintFlags`（六类约束开关） | framework §5.10 |
+| `copp/config.py` | 从 YAML 加载机器人逐关节约束 → `RobotLimits` | framework §5.5 |
+| `robot/base.py` | `KinematicsModel` / `DynamicsModel` 协议 | framework §5.1 |
+| `robot/ur5.py` | `UR5Kinematics`（真实 UR5 DH 运动学：fk/jacobian 解析解、ik 数值 DLS，落地 `KinematicsModel` 协议）+ `UR5RobotModel`（真实 TCP 几何 + 对角近似动力学，供本 self-test 使用） | framework §5.1 |
+| `copp/backend/cvxpy_backend.py` | CLARABEL 求解 | framework §5.9 |
+| `copp/viz.py` | 结果可视化（2×3 概览图，可选 matplotlib） | framework §5.8 |
+
+> **机器人本体**：M1 起用真实 UR5（标准 DH 参数、官方公开逐关节力矩上限），不再是
+> 与关节数无关的"合成 N 轴"占位。`UR5Kinematics.fk`/`jacobian` 是解析解（已用有限差分
+> 交叉验证到 ~1e-10），`ik` 是阻尼最小二乘数值迭代；`UR5RobotModel.torque_coeffs` 仍是
+> **对角近似**（下游集中质量单摆臂估算，量级贴近真实 UR5 但非精确 RNE，无科氏/惯量耦合），
+> 真实 `DynamicsModel`/RNE 待 M2+ 落地。`joint_path` 仍是合成随机轨迹（路径生成层 M2/M3
+> 落地前的占位），但 `tcp_geometry`/`tcp_coeffs` 现在真实调用 `UR5Kinematics.jacobian`
+> 沿该路径求值，不再是与关节角无关的虚构公式。见 `robot/ur5.py` 模块 docstring 的数据来源。
 
 ## 运行
 
 ```bash
 cd robot_copp
 pip install numpy scipy cvxpy clarabel pyyaml matplotlib   # 依赖（matplotlib 供可视化）
-python tests/test_splp_kernel.py                           # 或 pytest（含可视化冒烟测试）
+python trajectory-planning/copp/self-test/test_splp_kernel.py                  # 或 pytest（含可视化冒烟测试）
 ```
 
-> 用例统一维护在 `tests/` 下（`test_splp_kernel.py`）。直接运行该脚本会跑全部
-> 断言并把两张图落到 `output/`。
+> 用例统一维护在 `trajectory-planning/copp/self-test/` 下（`test_splp_kernel.py`）。直接运行该脚本会跑全部
+> 断言并把三张图落到 `trajectory-planning/copp/self-test/output/`。
 
-**机器人约束配置**：本体逐关节约束（`vmax/amax/jmax/tau`）与两端边界从
-[`configs/robot_3axis.yaml`](./configs/robot_3axis.yaml) 读取；TCP 速度模上界
-（`v_tcp_max/w_tcp_max`）作为“给定”参数在调用处传入（任务/工艺侧设定）：
+**机器人约束配置**：本体逐关节约束（`vmax/amax/jmax/tau`）与两端边界默认从
+[`configs/robot_ur5.yaml`](./configs/robot_ur5.yaml) 读取（UR5 六轴）。三档可信度
+（详见该文件内注释）：`tau_max` 为 Universal Robots 官网公开的逐关节力矩上限（官方
+权威）；`vmax` 取自 ROS-Industrial `ur5.urdf.xacro` 的关节速度限（驱动真实 UR5 硬件
+的社区描述文件，逐关节不同，非统一近似值）；`amax/jmax` **无任何官方或社区数据**，
+是按 vmax 的经验比例臆造的示例值，不代表真实机器人规格。
+[`configs/robot_3axis.yaml`](./configs/robot_3axis.yaml) 保留作通用/教学示例。
+TCP 速度模上界（`v_tcp_max/w_tcp_max`）作为“给定”参数在调用处传入（任务/工艺侧设定）：
 
 ```python
 from copp import load_robot_limits
-limits = load_robot_limits("configs/robot_3axis.yaml", v_tcp_max=0.6, w_tcp_max=0.9)
+limits = load_robot_limits("configs/robot_ur5.yaml", v_tcp_max=0.6, w_tcp_max=0.9)
 ```
 
-改机器人本体约束只改 YAML；测试的唯一约束来源见 `tests/limits_config.py`。
+改机器人本体约束只改 YAML；测试的唯一约束来源见 `trajectory-planning/copp/self-test/limits_config.py`。
 
 **约束开关（可选约束）**：六类约束（速度 / 加速度 / jerk / 力矩 / TCP 位置速度 /
 TCP 姿态角速度）均可单独启用或关闭，开关放在
@@ -58,21 +87,21 @@ solve_splp(data, SolveOptions(flags=flags))     # 关闭的约束求解时不施
 `ConstraintFlags` 默认全开；关闭某约束仅表示求解时不施加它（其上/下界数据仍可存在）。
 被关闭约束的对应量便不再被限制（其超限比可 >1），时间相应变化。
 
-**单一测试用例** `test_splp_kernel`（`tests/test_splp_kernel.py`）一次求解后完成全部断言
+**单一测试用例** `test_splp_kernel`（`trajectory-planning/copp/self-test/test_splp_kernel.py`）一次求解后完成全部断言
 并输出三张图：SPLP 迭代 `t_final` **单调不增**并收敛、剖面形状/边界、rest-to-rest
 （首末速度=0）、s↔t 有限且严格递增、M4（TCP 速度模 + 关节力矩）约束满足且至少一项绑定、
 机器人配置加载。典型行为：jerk/acc 约束**恰好贴边**（超限比 ≈1.0）—— jerk-限时最优。
 
 **可视化**（`copp.viz`，三张均由单一用例 `test_splp_kernel` 一次生成，便于对照分析）：
 
-- `output/splp_test.png`（`plot_splp_result`，2×3）：① SPLP 收敛；② 速度剖面 ṡ(s)
+- `self-test/output/splp_test.png`（`plot_splp_result`，2×3）：① SPLP 收敛；② 速度剖面 ṡ(s)
   与上界 √ā；③ 路径加速度 b(s)；④ 约束利用率 vs s；⑤ 时间律 s(t)；⑥ 关节速度。
-- `output/splp_limits_test.png`（`plot_kinematic_limits`，2×3，M4 数据）：① 关节速度
+- `self-test/output/splp_limits_test.png`（`plot_kinematic_limits`，2×3，M4 数据）：① 关节速度
   ② 关节加速度 ③ 关节 jerk ④ **关节力矩** ⑤ TCP 位置速度模 ‖ṗ‖ ⑥ TCP 姿态角速度模
   ‖ω‖，各带约束线。信号用 `reconstruct_time_signals`（`interp.fine_profiles` 的**区间内
   细剖面** Prop.1/2）重构 —— q̈ 与 q⃛ **导数自洽**（网格点+线性插值会在静止段把
   `q̈∝σ^{1/3}` 画成 `∝σ`，使加速度起点斜率与 jerk 值对不上）。
-- `output/fig4_interpolation.png`（`plot_fig4_interpolation`）：**复现论文 Fig.4**
+- `self-test/output/fig4_interpolation.png`（`plot_fig4_interpolation`）：**复现论文 Fig.4**
   —— 静止起点（`a_s=b_s=0`）+ 非静止终点的区间解析插值。
   ① `a(u)`：静止段 `(u-u_s)^{4/3}`（Prop.2）过渡到 c-ZOH 二次段（Prop.1）；② `b(u)`：
   静止段 `(u-u_s)^{1/3}`、尾部线性；③ 参数 jerk `⃛u=c√a`：头部 `N_s` 段恒定、尾部
@@ -83,7 +112,7 @@ solve_splp(data, SolveOptions(flags=flags))     # 关闭的约束求解时不施
 
 ## M4 增量（约束扩展，已完成）
 
-在 M1 内核上新增两类约束（`constraints.py` + `types.TcpConstraint/TorqueConstraint`）：
+在 M1 内核上新增两类约束（`constraints/ingest.py` + `types.TcpConstraint/TorqueConstraint`）：
 
 - **TCP 速度模长**：位置速度模 `‖ṗ‖=cv·√a`、姿态角速度模 `‖ω‖=cw·√a`，均为 a 的
   **线性上界**，折进 `velocity_upper_bound` 的 ā（设计 v0.3 的两项 TCP 约束）。
@@ -93,7 +122,7 @@ solve_splp(data, SolveOptions(flags=flags))     # 关闭的约束求解时不施
   一处配置。测试中 TCP 系数由合成 TCP 路径、力矩系数由合成对角惯性+重力给出
   （实际管线由 Jacobian / 逆动力学提供，M2 的 `DynamicsModel`）。
 - 验证：`test_m4_tcp_and_torque_respected` 断言 TCP 速度模与力矩满足约束；
-  `output/splp_limits_test.png` 面板 ④关节力矩（贴 ±τ_max）、⑤‖ṗ‖（贴住 v_max）
+  `self-test/output/splp_limits_test.png` 面板 ④关节力矩（贴 ±τ_max）、⑤‖ṗ‖（贴住 v_max）
   直观展示约束绑定。
 
 ## 静止段 / 零进给奇异（Box I，已在优化器落地）
@@ -123,7 +152,10 @@ solve_splp(data, SolveOptions(flags=flags))     # 关闭的约束求解时不施
 ## 仍待补齐（后续里程碑）
 
 - **备选 SOCP 路线**（`mode="socp"`，精确目标）未实现，默认走 PLP+LP（算力最省）。
-- 上游 `commands/ blending/ lowering/`（M2/M3）、`hlaw/`（M5）见 framework §9。
+- 上游 `trajectory-planning/path/{commands,blending,lowering}`（M2/M3）、
+  `trajectory-planning/planner/hlaw`（M5）、
+  `trajectory-planning/planner/{synth,planner.py}`（M2+）已按 framework §2/§9 建好空目录/占位文件，
+  尚无实现，见各 `__init__.py` 说明。
 
 ## 最小用法
 

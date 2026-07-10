@@ -11,7 +11,7 @@ constraints:
   jerk: true                  # 轴向 jerk |q⃛|≤jmax（3 阶）
   torque: false                # 关节力矩 τ_min≤τ≤τ_max
   tcp_velocity: true          # TCP 位置速度模 ‖ṗ‖≤v_tcp_max
-  tcp_angular_velocity: true  # TCP 姿态角速度模 ‖ω‖≤w_tcp_max
+  tcp_angular_velocity: false  # TCP 姿态角速度模 ‖ω‖≤w_tcp_max
 
 # 论文 Fig.4 复现示意（区间解析插值 Prop.1 + Prop.2）参数。
 fig4_example:

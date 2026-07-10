@@ -5,8 +5,6 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
-.venv/
-venv/
 
-# 生成的图（运行 tests 自动重建）
-output/
+# 生成的图（运行 trajectory-planning/copp/self-test 自动重建）
+trajectory-planning/copp/self-test/output/

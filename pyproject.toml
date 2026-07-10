@@ -8,9 +8,11 @@ version = "0.1.0"
 description = "基于 copp 算法（TOTP-SPLP）的机器人时间最优轨迹规划模块"
 requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.26",
+    "numpy>=1.26,<2.0",   # cvxpy/qdldl/osqp 的 Win 二进制轮子在 numpy>=2 下会段错误崩溃
     "scipy>=1.11",
-    "cvxpy>=1.4",
+    "cvxpy>=1.5,<1.6",    # 1.9.x 依赖 osqp>=1.0 / qdldl>=0.1.9，其 Win 轮子 import 即崩溃
+    "osqp>=0.6.7,<1.0",   # 1.1.x 的 algebra 模块在 Windows 上 import 段错误（锁到稳定 0.6.x）
+    "qdldl>=0.1.7,<0.1.8",# 0.1.9 轮子 import 段错误
     "clarabel>=0.6",
     "pyyaml>=6.0",       # 机器人配置文件加载（configs/*.yaml）
 ]
@@ -21,7 +23,9 @@ viz = ["matplotlib"]
 test = ["pytest", "hypothesis"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["copp"]
+packages = ["trajectory-planning/copp", "trajectory-planning/path", "trajectory-planning/planner", "robot"]
+exclude = ["trajectory-planning/copp/self-test"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["trajectory-planning/copp/self-test"]
+pythonpath = [".", "trajectory-planning"]

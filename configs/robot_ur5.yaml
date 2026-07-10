@@ -1,0 +1,65 @@
+# 机器人运动学 / 动力学约束配置（逐关节，UR5）
+#
+# 说明：
+#   - 本文件只描述"机器人本体"的轴向约束（速度/加速度/jerk/力矩）与路径两端边界。
+#   - TCP 速度模上界（v_tcp_max / w_tcp_max）不在此文件——由调用方作为"给定"参数
+#     传入 load_robot_limits(...)（属于任务/工艺侧设定，而非机器人本体参数）。
+#   - 约束均按对称处理：
+#       |q̇_i| ≤ vmax_i, |q̈_i| ≤ amax_i, |q⃛_i| ≤ jmax_i, tau_min_i ≤ τ_i ≤ tau_max_i
+#   - 单位：位置 rad，故 vmax[rad/s]、amax[rad/s²]、jmax[rad/s³]、tau[N·m]。
+#
+# 数据来源（准确度分三档，逐条标注，勿混为同一可信度）：
+#   - tau_max：Universal Robots 官网 "Max. joint torques CB3 and e-Series"
+#     —— **官方权威**：base 54, shoulder 150, elbow 150, wrist1/2 28, wrist3 9 Nm。
+#   - vmax：ROS-Industrial `universal_robot` 仓库 `ur5.urdf.xacro` 的
+#     `<limit velocity=.../>` —— **社区维护、驱动真实 UR5 硬件的描述文件**
+#     （可信但非 UR 官方数据表原文）：base/shoulder/elbow 3.15 rad/s，
+#     wrist1/2/3 3.2 rad/s（逐关节不同，不是统一近似值）。
+#   - amax/jmax：**无任何官方或社区公开数据**（UR 数据表、`ur5.urdf.xacro`
+#     均只给速度/力矩限，不含加速度/jerk）。此处按各关节 vmax 的 10×/200×
+#     经验比例**臆造**（与 demo_3axis 配置同一比例惯例），仅供数值示例，
+#     不代表真实机器人规格——若需要真实值需另行实测或查阅厂商未公开资料。
+
+name: ur5
+n_axis: 6
+
+# 路径两端 a=ṡ²、b=s̈ 边界。
+#   a_bnd=(0,0) 即 rest-to-rest（首末速度严格为 0）；零进给奇异由 Prop.2 静止段
+#   闭式插值处理（copp/solve/interp.py）。若需非零起末速度，改这里即可。
+boundary:
+  a_bnd: [0.0, 0.0]
+  b_bnd: [0.0, 0.0]
+
+# 逐关节约束，顺序：base / shoulder / elbow / wrist1 / wrist2 / wrist3。
+# tau_min 省略，缺省取 -tau_max（对称力矩）。
+joints:
+  - name: base
+    vmax: 3.15
+    amax: 31.5
+    jmax: 630.0
+    tau_max: 54.0
+  - name: shoulder
+    vmax: 3.15
+    amax: 31.5
+    jmax: 630.0
+    tau_max: 150.0
+  - name: elbow
+    vmax: 3.15
+    amax: 31.5
+    jmax: 630.0
+    tau_max: 150.0
+  - name: wrist1
+    vmax: 3.2
+    amax: 32.0
+    jmax: 640.0
+    tau_max: 28.0
+  - name: wrist2
+    vmax: 3.2
+    amax: 32.0
+    jmax: 640.0
+    tau_max: 28.0
+  - name: wrist3
+    vmax: 3.2
+    amax: 32.0
+    jmax: 640.0
+    tau_max: 9.0
