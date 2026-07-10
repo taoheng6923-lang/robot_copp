@@ -1,0 +1,41 @@
+# 机器人运动学 / 动力学约束配置（逐关节）
+#
+# 说明：
+#   - 本文件只描述“机器人本体”的轴向约束（速度/加速度/jerk/力矩）与路径两端边界。
+#   - TCP 速度模上界（v_tcp_max / w_tcp_max）不在此文件——由调用方作为“给定”参数
+#     传入 load_robot_limits(...)（属于任务/工艺侧设定，而非机器人本体参数）。
+#   - 各关节可取不同数值；此处示例取相同值。约束均按对称处理：
+#       |q̇_i| ≤ vmax_i, |q̈_i| ≤ amax_i, |q⃛_i| ≤ jmax_i, tau_min_i ≤ τ_i ≤ tau_max_i
+#   - 单位：位置 rad，故 vmax[rad/s]、amax[rad/s²]、jmax[rad/s³]、tau[N·m]。
+
+name: demo_3axis
+n_axis: 3
+
+# 路径两端 a=ṡ²、b=s̈ 边界。
+#   a_bnd=(0,0) 即 rest-to-rest（首末速度严格为 0）；零进给奇异由 Prop.2 静止段
+#   闭式插值处理（robot_copp/solve/interp.py）。若需非零起末速度，改这里即可。
+boundary:
+  a_bnd: [0.0, 0.0]
+  b_bnd: [0.0, 0.0]
+
+# 逐关节约束。tau_min 可省略，缺省取 -tau_max（对称力矩）。
+# 若某关节不给 tau_max（或整体省略力矩字段），则不启用力矩上下界。
+joints:
+  - name: joint0
+    vmax: 1.5
+    amax: 15.0
+    jmax: 300.0
+    tau_max: 3.0
+    tau_min: -3.0
+  - name: joint1
+    vmax: 1.5
+    amax: 15.0
+    jmax: 300.0
+    tau_max: 3.0
+    tau_min: -3.0
+  - name: joint2
+    vmax: 1.5
+    amax: 15.0
+    jmax: 300.0
+    tau_max: 3.0
+    tau_min: -3.0

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "robot_copp"
+version = "0.1.0"
+description = "基于 copp 算法（TOTP-SPLP）的机器人时间最优轨迹规划模块"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "cvxpy>=1.4",
+    "clarabel>=0.6",
+    "pyyaml>=6.0",       # 机器人配置文件加载（configs/*.yaml）
+]
+
+[project.optional-dependencies]
+kinematics = ["roboticstoolbox-python"]   # M2+：IK/FK/Jacobian
+viz = ["matplotlib"]
+test = ["pytest", "hypothesis"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["copp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
