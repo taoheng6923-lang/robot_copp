@@ -6,18 +6,27 @@
   - constraints 用逆动力学生成力矩行。
 
 `ur5.UR5Kinematics` 用真实 UR5 DH 参数落地 KinematicsModel 协议（fk/jacobian
-解析解，ik 数值 DLS）；DynamicsModel 仍是 `ur5.UR5RobotModel.torque_coeffs`
+解析解，ik 解析逆解 + DLS 兜底）；DynamicsModel 仍是 `ur5.UR5RobotModel.torque_coeffs`
 的对角近似 stand-in，真实 RNE 待 M2+ 落地。其余机型可仿 `ur5.py` 新增
 DhPoeKinematics / RtbKinematics 适配器。
 
-本模块只定义接口，不含规划算法（纯适配层）。
+本模块只定义接口与 `Pose` 数据类型，不含规划算法（纯适配层）。
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import numpy as np
+
+
+@dataclass
+class Pose:
+    """位姿：位置 + 旋转矩阵（相对基座）。fk/ik 协议的交换格式。"""
+
+    position: np.ndarray   # (3,)
+    rotation: np.ndarray   # (3,3)
 
 
 @runtime_checkable

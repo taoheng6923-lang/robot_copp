@@ -1,12 +1,25 @@
-"""路径构造模块（指令 → 笛卡尔路径 → 关节路径，M2/M3，尚未实现）。
+"""路径构造模块（指令 → 笛卡尔路径 → 关节路径，framework §5.2-5.4 / 设计 §3-5）。
 
-指令序列（关节运动/直线/圆弧）经 blending（G2 Hermite 过渡）、lowering
-（自适应采样 + IK + 链式法则求导）翻译为 copp 求解所需的 PathDerivatives。
-与 `trajectory-planning/copp/`（纯数值求解核心）、顶层 `robot/`（运动学
-动力学本体）相互独立，经 `trajectory-planning/planner/planner.py` 编排串联。
-见 docs/python_framework.md §5.2-5.4、docs/robot_copp_design.md §3-5。
+指令序列（关节运动/直线/圆弧）经 lowering（自适应采样 + 连续解 IK + 链式法则
+求导）翻译为 copp 求解所需的 PathDerivatives。与 `trajectory-planning/copp/`
+（纯数值求解核心）、顶层 `robot/`（运动学动力学本体）相互独立，经
+`trajectory-planning/planner/`（M2+）编排串联。
 
-- commands/  指令层：JointMove / LinearMove / CircularMove → PoseSegment
-- blending/  最优 Hermite blending（笛卡尔空间 G2 过渡）
-- lowering/  降维：BlendedPath → 关节 PathDerivatives
+- types.py   CartesianSamples / CartesianPath / JointSpacePath / PathDerivatives
+- errors.py  PathError 异常层次
+- commands/  指令层（M2 已实现；段间 G0 衔接，G2 blending 属 M3）
+- lowering/  降维层（M2 已实现）
+- blending/  最优 Hermite blending（M3，未实现）
 """
+
+from .types import CartesianSamples, CartesianPath, JointSpacePath, PathDerivatives
+from .errors import (
+    PathError, ZeroLengthCommandError, DegenerateArcError,
+    UnreachablePoseError, IkJumpError, JunctionMismatchError,
+)
+
+__all__ = [
+    "CartesianSamples", "CartesianPath", "JointSpacePath", "PathDerivatives",
+    "PathError", "ZeroLengthCommandError", "DegenerateArcError",
+    "UnreachablePoseError", "IkJumpError", "JunctionMismatchError",
+]

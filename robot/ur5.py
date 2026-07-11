@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .base import Pose
+
 # ── UR5 标准 DH 参数（Universal Robots 官网，标准 DH 约定） ─────────────
 # 关节顺序：base(1) shoulder(2) elbow(3) wrist1(4) wrist2(5) wrist3(6)
 DH_A = np.array([0.0, -0.425, -0.39225, 0.0, 0.0, 0.0])
@@ -64,14 +66,6 @@ def _dh_transform(theta: float, d: float, a: float, alpha: float) -> np.ndarray:
         [0.0,       sa,       ca,      d],
         [0.0,      0.0,      0.0,    1.0],
     ])
-
-
-@dataclass
-class Pose:
-    """位姿：位置 + 旋转矩阵（相对基座）。"""
-
-    position: np.ndarray   # (3,)
-    rotation: np.ndarray   # (3,3)
 
 
 @dataclass

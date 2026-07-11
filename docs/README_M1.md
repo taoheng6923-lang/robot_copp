@@ -7,7 +7,7 @@
 > - 顶层 `robot/` —— 机器人运动学/动力学本体（FK/IK/Jacobian/逆动力学），独立于其余三者
 > - `trajectory-planning/`（纯目录容器，非 Python 包）下：
 >   - `copp/` —— 纯 TOTP-SPLP 数值求解核心（types/options/constraints/solve/backend），不依赖 robot/path
->   - `path/` —— 路径构造（commands/blending/lowering，M2/M3，尚未实现）
+>   - `path/` —— 路径构造（M2 已实现 commands/lowering，见 [`README_M2.md`](./README_M2.md)；blending 属 M3 未实现）
 >   - `planner/` —— 调度/合成/门面（hlaw/synth/planner.py，M2+/M5，尚未实现）
 >
 > 三者（`path`/`copp`/`planner`）+ 顶层 `robot` 经 `trajectory-planning/planner/planner.py`
@@ -35,15 +35,17 @@
 | `copp/options.py` | `ConstraintFlags`（六类约束开关） | framework §5.10 |
 | `copp/config.py` | 从 YAML 加载机器人逐关节约束 → `RobotLimits` | framework §5.5 |
 | `robot/base.py` | `KinematicsModel` / `DynamicsModel` 协议 | framework §5.1 |
-| `robot/ur5.py` | `UR5Kinematics`（真实 UR5 DH 运动学：fk/jacobian 解析解、ik 数值 DLS，落地 `KinematicsModel` 协议）+ `UR5RobotModel`（真实 TCP 几何 + 对角近似动力学，供本 self-test 使用） | framework §5.1 |
+| `robot/ur5.py` | `UR5Kinematics`（真实 UR5 DH 运动学：fk/jacobian 解析解、ik 闭式解析逆解 8 支路 + 退化位姿 DLS 兜底，落地 `KinematicsModel` 协议）+ `UR5RobotModel`（真实 TCP 几何 + 对角近似动力学，供本 self-test 使用） | framework §5.1 |
 | `copp/backend/cvxpy_backend.py` | CLARABEL 求解 | framework §5.9 |
 | `copp/viz.py` | 结果可视化（2×3 概览图，可选 matplotlib） | framework §5.8 |
 
 > **机器人本体**：M1 起用真实 UR5（标准 DH 参数、官方公开逐关节力矩上限），不再是
 > 与关节数无关的"合成 N 轴"占位。`UR5Kinematics.fk`/`jacobian` 是解析解（已用有限差分
-> 交叉验证到 ~1e-10），`ik` 是阻尼最小二乘数值迭代；`UR5RobotModel.torque_coeffs` 仍是
-> **对角近似**（下游集中质量单摆臂估算，量级贴近真实 UR5 但非精确 RNE，无科氏/惯量耦合），
-> 真实 `DynamicsModel`/RNE 待 M2+ 落地。`joint_path` 仍是合成随机轨迹（路径生成层 M2/M3
+> 交叉验证到 ~1e-10）；`ik` 是**闭式解析逆解**（枚举全部 ≤8 支路取离 seed 最近者，
+> O(1)，已用 200 组随机位形验证到 ~1e-13），退化位形（腕奇异/不可达）回退阻尼最小
+> 二乘（DLS）数值迭代兜底。`UR5RobotModel.torque_coeffs` 仍是**对角近似**（下游集中
+> 质量单摆臂估算，量级贴近真实 UR5 但非精确 RNE，无科氏/惯量耦合），真实
+> `DynamicsModel`/RNE 待 M2+ 落地。`joint_path` 仍是合成随机轨迹（路径生成层 M2/M3
 > 落地前的占位），但 `tcp_geometry`/`tcp_coeffs` 现在真实调用 `UR5Kinematics.jacobian`
 > 沿该路径求值，不再是与关节角无关的虚构公式。见 `robot/ur5.py` 模块 docstring 的数据来源。
 
@@ -119,11 +121,12 @@ solve_splp(data, SolveOptions(flags=flags))     # 关闭的约束求解时不施
 - **关节力矩**：`τ = n_tor·a + m_tor·b + g_tor`（2 阶、对 (a,b) 精确线性），逐轴
   `τ_min ≤ τ ≤ τ_max`，加进 LP 与种子（论文 eq.44 / robot6dof §5.2.5）。
 - 均经 `RobotLimits`（`v_tcp_max/w_tcp_max/tau_max`）+ `to_topp3_data(tcp_geom=…, torque_coeffs=…)`
-  一处配置。测试中 TCP 系数由合成 TCP 路径、力矩系数由合成对角惯性+重力给出
-  （实际管线由 Jacobian / 逆动力学提供，M2 的 `DynamicsModel`）。
-- 验证：`test_m4_tcp_and_torque_respected` 断言 TCP 速度模与力矩满足约束；
+  一处配置。测试中 TCP 系数由 `UR5RobotModel.tcp_coeffs`（真实 UR5 Jacobian 沿合成关节
+  路径求值）给出，力矩系数由 `UR5RobotModel.torque_coeffs`（对角近似，见 `robot/ur5.py`）
+  给出；真实逆动力学（M2 的 `DynamicsModel`/RNE）待后续落地。
+- 验证：单一测试用例 `test_splp_kernel`（`_assert_solver` 内）断言 TCP 速度模与力矩满足约束；
   `self-test/output/splp_limits_test.png` 面板 ④关节力矩（贴 ±τ_max）、⑤‖ṗ‖（贴住 v_max）
-  直观展示约束绑定。
+  直观展示约束绑定（各面板限位线均按关节自身实际配置值画，同色虚线，见 `copp/viz.py`）。
 
 ## 静止段 / 零进给奇异（Box I，已在优化器落地）
 
@@ -152,10 +155,13 @@ solve_splp(data, SolveOptions(flags=flags))     # 关闭的约束求解时不施
 ## 仍待补齐（后续里程碑）
 
 - **备选 SOCP 路线**（`mode="socp"`，精确目标）未实现，默认走 PLP+LP（算力最省）。
-- 上游 `trajectory-planning/path/{commands,blending,lowering}`（M2/M3）、
-  `trajectory-planning/planner/hlaw`（M5）、
-  `trajectory-planning/planner/{synth,planner.py}`（M2+）已按 framework §2/§9 建好空目录/占位文件，
-  尚无实现，见各 `__init__.py` 说明。
+- **M2（指令层 + 降维层）已完成**：`trajectory-planning/path/{commands,lowering}` 可跑，
+  见 [`README_M2.md`](./README_M2.md)。
+- `trajectory-planning/path/blending`（M3）、`trajectory-planning/planner/hlaw`（M5）、
+  `trajectory-planning/planner/{synth,planner.py}`（M2+）仍是占位文件，尚无实现，
+  见各 `__init__.py` 说明。
+- **真实动力学**（`robot.base.DynamicsModel`/RNE）未实现；`UR5RobotModel.torque_coeffs`
+  仍是对角近似，见上文"机器人本体"说明。
 
 ## 最小用法
 

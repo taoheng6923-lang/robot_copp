@@ -7,7 +7,7 @@
         UR5RobotModel（真实 TCP 几何 + 对角近似动力学，供 SPLP 测试/可视化）
 """
 
-from .base import KinematicsModel, DynamicsModel
-from .ur5 import UR5Kinematics, UR5RobotModel, Pose
+from .base import KinematicsModel, DynamicsModel, Pose
+from .ur5 import UR5Kinematics, UR5RobotModel
 
-__all__ = ["KinematicsModel", "DynamicsModel", "UR5Kinematics", "UR5RobotModel", "Pose"]
+__all__ = ["KinematicsModel", "DynamicsModel", "Pose", "UR5Kinematics", "UR5RobotModel"]

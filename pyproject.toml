@@ -24,8 +24,8 @@ test = ["pytest", "hypothesis"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["trajectory-planning/copp", "trajectory-planning/path", "trajectory-planning/planner", "robot"]
-exclude = ["trajectory-planning/copp/self-test"]
+exclude = ["trajectory-planning/copp/self-test", "trajectory-planning/path/self-test"]
 
 [tool.pytest.ini_options]
-testpaths = ["trajectory-planning/copp/self-test"]
+testpaths = ["trajectory-planning/copp/self-test", "trajectory-planning/path/self-test"]
 pythonpath = [".", "trajectory-planning"]

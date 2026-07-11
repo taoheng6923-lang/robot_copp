@@ -238,11 +238,17 @@ $$
 
 $$
 \mathbf q'_m=\mathbf J_m^{-1}\mathbf r'_m,\quad
-\mathbf q''_m=\mathbf J_m^{-1}\mathbf r''_m-\mathbf J_m^{-1}\mathbf J'_m\mathbf q'_m,\quad
-\mathbf q'''_m=\mathbf J_m^{-1}\mathbf r'''_m-\mathbf J_m^{-1}\mathbf J'_m\mathbf q''_m-\mathbf J_m^{-1}\mathbf J''_m\mathbf q'_m
+\mathbf q''_m=\mathbf J_m^{-1}\bigl(\mathbf r''_m-\mathbf J'_m\mathbf q'_m\bigr),\quad
+\mathbf q'''_m=\mathbf J_m^{-1}\bigl(\mathbf r'''_m-2\,\mathbf J'_m\mathbf q''_m-\mathbf J''_m\mathbf q'_m\bigr)
 $$
 
-$\mathbf J',\mathbf J''$ 沿路径方向前向/中心差分（`robot6dof` §3.2–3.4）。精确 $\mathbf q'''$ 是保证 jerk 约束精度 $<2\%$ 的关键。
+> 注意三阶式中 $\mathbf J'\mathbf q''$ 的系数是 **2**（对 $\mathbf J'\mathbf q'+\mathbf J\mathbf q''=\mathbf r''$
+> 再求导，乘积法则产生两个 $\mathbf J'\mathbf q''$ 项）。本文档 v0.5 及之前版本漏写了该系数，
+> 已由实现（`path/lowering/derivatives.py`）的有限差分交叉验证确认并修正。
+
+$\mathbf J',\mathbf J''$ 沿路径方向前向/中心差分（`robot6dof` §3.2–3.4；实现取方向差分
+$\mathbf J'=\mathrm DJ[\mathbf q']$、$\mathbf J''=\mathrm D^2J[\mathbf q',\mathbf q']+\mathrm DJ[\mathbf q'']$）。
+精确 $\mathbf q'''$ 是保证 jerk 约束精度 $<2\%$ 的关键。
 
 ### 5.4 奇异处理
 
@@ -392,6 +398,15 @@ $$\big|t_f^{(p)}-t_f^{(p-1)}\big|<\varepsilon_t \quad\text{或}\quad \big\|a^{(p
 
 ## 10. 模块划分与数据结构
 
+> **与实际实现的差异**：下面这棵树是"实现无关"的职责划分（本文档 §12.1 的立场），
+> 实际 Python 实现把它拆到了顶层 `robot/`（本节没有单列的机器人本体，运动学/动力学
+> 现由顶层独立包 `robot/ur5.py` 提供）+ `trajectory-planning/{copp,path,planner}`
+> 三个包：`commands/blending/lowering` → `trajectory-planning/path/`；
+> `constraints/solve` → `trajectory-planning/copp/`；`hlaw/synth` 及本文档未单列的
+> 门面 → `trajectory-planning/planner/`。当前只有 `copp/`（对应本节 §6/§7）与顶层
+> `robot/` 已实现，其余仍是占位目录。逐模块的真实路径、实现状态见
+> [`README_M1.md`](./README_M1.md)；本节的职责划分与算法归属依旧是设计权威。
+
 ```
 robot_copp/
 │
@@ -449,7 +464,7 @@ TrajectoryResult  : s_grid, a_profile, b_profile, num_stationary, t_final, t_s, 
 
 **最优五次 Hermite（G2）**：$\mathbf p_5(u)$ 见 §4.3，$\alpha_0,\alpha_1$ 由 $\min\int\|\mathbf p_5'''\|^2$ 选取
 
-**关节导数（链式法则）**：$\mathbf q'=\mathbf J^{-1}\mathbf r'$，$\mathbf q''=\mathbf J^{-1}\mathbf r''-\mathbf J^{-1}\mathbf J'\mathbf q'$，$\mathbf q'''=\mathbf J^{-1}\mathbf r'''-\mathbf J^{-1}\mathbf J'\mathbf q''-\mathbf J^{-1}\mathbf J''\mathbf q'$
+**关节导数（链式法则）**：$\mathbf q'=\mathbf J^{-1}\mathbf r'$，$\mathbf q''=\mathbf J^{-1}(\mathbf r''-\mathbf J'\mathbf q')$，$\mathbf q'''=\mathbf J^{-1}(\mathbf r'''-2\mathbf J'\mathbf q''-\mathbf J''\mathbf q')$（三阶式系数 2，见 §5.3 注）
 
 **copp 状态与动力学**：$a=\dot s^2,\ b=\ddot s,\ c=\dddot s\dot s$；$a'=2b,\ b'=c$；$J=\int ds/\sqrt a$
 
