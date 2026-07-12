@@ -1,4 +1,224 @@
-# Session Handoff — COPP-Python 轨迹规划框架设计
+# Session Handoff — robot_copp 项目会话记录
+
+> 本文件累积记录本仓库（`robot_copp`）关键会话的目标、决策、产出与未完成事项，供跨会话/换环境时续接工作。**按时间倒序排列，最新会话在最前面**。Session 1（下方最后一节）是项目启动前从另一仓库导出的设计讨论存档，与当前代码结构/实现已有很大出入，仅供历史参考——真正"如实反映当前代码"的权威文档是 [`docs/README_M1.md`](../docs/README_M1.md)（内核 M1/M4）与 [`docs/README_M2.md`](../docs/README_M2.md)（指令+降维 M2）。
+
+---
+
+## Session 3（2026-07-13）：依赖修复可跑 + UR5 解析 IK + t–n 约束调通 + Fig.3/Fig.4 出图 + c 平滑惩罚 + 设计文档补全
+
+### 0. 背景与定位
+
+接手时项目**依赖装不上（测试跑不了）**，且 Session 2 搭的 t–n 速度相关力矩约束**未调通**。本会话主线是"把项目真正跑起来 + 补齐 copp 求解层的 t–n 约束、可视化与设计文档"。改动集中在 `trajectory-planning/copp/`、`robot/ur5.py`、`configs/`、`docs/`。**收尾 `pytest -q` = 3/3 通过**（test_copp / test_lowering / test_commands）。
+
+> 与 Session 2 handoff 的关系：Session 2 把"解析 IK / t–n 约束 / test_copp 改名"记为"用户或 linter 修改、未亲见"。**本会话是实际动手实现/调通这些的过程**（尤其 t–n 从不可行→可行、Fig.4 从合成示意→真实用例数据）；下文以本会话实测为准。
+
+### 1. 依赖修复（Windows 段错误）
+
+`cvxpy`/`clarabel` 缺失，直接 `pip install` 会把 numpy 升到 2.x 并**段错误崩溃**（`import cvxpy` → 0xC0000005）。逐个二分定位到 `qdldl 0.1.9`、`osqp 1.1.3` 的最新 Windows 轮子 import 即崩。最终方案：
+
+- 独立虚拟环境 `.venv`（`.\.venv\Scripts\python.exe`，Anaconda Python 3.12 建），**钉稳定栈**：`numpy 1.26.4`、`cvxpy 1.5.4`、`osqp 0.6.7.post3`、`qdldl 0.1.7.post5`、`clarabel 0.11.1`、`scipy 1.13`、`matplotlib`。
+- 把这些上/下界写进 `pyproject.toml` `dependencies`（`numpy<2`、`cvxpy<1.6`、`osqp>=0.6.7,<1.0`、`qdldl>=0.1.7,<0.1.8` 等），避免下次 fresh install 再踩崩溃轮子。
+- **恢复 Anaconda base**：误升级把 base 的 numpy 弄成 2.x（破坏 base scipy/matplotlib），已还原到 1.26.4 并清掉误装包。
+- **CLAUDE.md 已记**：不要用 base 环境装本项目依赖；测试用 `.\.venv\Scripts\python.exe -m pytest -q`。
+
+### 2. CLAUDE.md 中文回复规则
+
+按用户要求在 `CLAUDE.md` 加"始终用中文回复"（项目级持久生效），顺带记了 `.venv` 测试命令与依赖注意事项。
+
+### 3. UR5 IK：数值 DLS → 闭式解析（`robot/ur5.py`）
+
+把 `ik` 从阻尼最小二乘牛顿迭代（≤200 步）换成 **Andersen 标准 DH 闭式解析逆解**：枚举 θ1(2)×θ5(2)×θ3(2)=≤8 支路，逐关节 2π 折叠后取离 seed 最近解，DLS 降为退化位形兜底（`_ik_dls`）。
+
+- **过程中发现并修的真实 bug**：初版平面两连杆（θ2/θ3/θ4）用错了平面——`T14=A2·A3·A4`（α2=α3=0）原点退化的是 **x-y 平面**（z≡d4 常量），我一开始按 x-z 平面解，导致 8 支路都有 ~0.1–0.2m 位置误差（姿态却对，因为 θ4 由 `T34` 反解总能补正姿态）。改用 x-y 平面 + `θ234=atan2(R14[1,0],R14[0,0])` 后往返 `fk∘ik` 误差降到 **~1.2e-13 m / 3e-8 rad**（3000 组随机位形），比 DLS 快 **~5.9×**。
+
+### 4. t–n 速度相关力矩约束：从不可行调到可行（本会话最大修复量）
+
+Session 2 已搭好类型/接线（`types.SpeedTorqueConstraint`、`ingest.speed_torque_constraints`、`ConstraintFlags.speed_torque`、lp_problem/seed/state/model/config 接线），但**种子 LP 不可行、跑不动**。本会话逐个修：
+
+1. **cvxpy `*` 被当矩阵乘**：`sec = a * (aq/w0)`（`Variable(N)*ndarray(N)` → 点积标量，污染约束）→ 改 `cp.multiply`。
+2. **静止端不可行（核心）**：原"固定切点"切线在 a=0 处引入伪速度项 `≈Fv·q_j/2`；UR5 肩关节重力 g≈140 已占 τ0=150 的 93%、余量仅 ~5N·m，被伪项吃掉 → 种子不可行。**改为把 √a 在 SCP 迭代点 a_lin 处线性化**（切点随迭代收敛到工作点、静止端无伪项），并把梯形包络写成"平台 + rolloff **两个精确 halfplane 之交**"（无需 facet 逼近梯形本身），跳过静止段（`num_stat`）。seed 在速度上界 a_bar 处线性化。
+3. **模型演进**：从"线性 τ0−κ|q̇|（emf_slope）"改为真实电机数据表的**梯形** t–n 特性（低速平台 τ0 到拐点 ω_c=vmax，线性收窄到 0 于空载 ω0）；`SpeedTorqueConstraint` 字段变为 `tau0/rated_speed/noload_speed/viscous/coulomb`（不再有 `emf_slope`）。
+4. **viz 用了废弃的 `st.emf_slope`** → 改用 `speed_torque_envelope`（梯形）；`plot_speed_torque` 里 τ0−κ|q̇| 标注也改梯形。
+5. **合成 Fv 过大**（肩关节额定转速黏滞 27N·m，物理不合理，导致任何速度都超力矩）→ 降到 `≈0.015·τ0/ω_c`（1.5%·τ0）。
+6. **验证**：解回代真实梯形 util ≤ **1.0000**（保守、贴边、绝不越界）；关掉 t–n 时真实 util 达 **~11.5**（必超限，证明约束必要）。启用 t–n 时轴速上界自动取 ω0（见 `state.velocity_upper_bound`）。
+7. `SpeedTorqueConstraint.n_facets` 字段现已**无用**（实现固定用两个精确 halfplane），保留未删。
+
+### 5. `tau_scale` 力矩倍率（可配置实验旋钮）
+
+把 `robot_ur5.yaml` 的 `tau_max` 恢复为**官方值**，新增顶层 `tau_scale`（`config.load_robot_limits` 统一乘 tau_max/tau_min、进而 t–n 平台 τ0），实验放开力矩余量看效果：1×→肩重力饱和限速（+226% 时间）、2×→+48%、3×→+26%（瓶颈转到 base 惯量）。**当前用户手动设 `tau_scale: 5.0`**。
+
+### 6. 论文 Fig.3 复现（`viz.plot_tn_convexification`）
+
+逐关节在 `(q̇²,τ)` 平面画：灰=真实梯形可行域（rolloff 段映射后弯曲→下方非凸）、蓝=仿射切线内逼近、红叉纹="切掉的非凸角"、散点=工作点（点色=利用率）。直观显示论文"切一角转凸"的意图与效果。出 `output/tn_convexification_test.png`。
+
+### 7. Fig.4 重构 + `test_splp_kernel.py → test_copp.py` + 唯一用例出图
+
+- **加控制量 c 曲线**：Fig.4 从 3 面板（a/b/jerk）变 4 面板（a/b/**c**/jerk）。c=b'=⃛u/√a：非静止段 c-ZOH 逐区间常值阶梯，静止端 →∞（正是静止段用 jerk-ZOH 的原因）。
+- **改为由唯一用例 profile 全程解析重构**：删掉合成示意数据路径（`fig4_interpolation_example`、`plot_fig4_interpolation`、`config.load_fig4_example`、`comm_paras.yaml` 的 `fig4_example` 节全部移除），新增 `viz.plot_interp_profiles(data, profile)` 用 `interp.fine_profiles` 覆盖**全部插补周期**（原来只有 4 个合成周期）。
+- **测试改名**：`test_splp_kernel.py → test_copp.py`（`git mv`），函数 `test_splp_kernel → test_copp`；**output 下 5 张图全部来自唯一用例的同一 `(data, profile)`**（splp / limits / speed_torque / tn_convexification / fig4）。
+
+### 8. c 控制平滑惩罚（目标函数扩展）
+
+中段 c 会无谓来回跳变（对时间最优无必要、使 jerk 锯齿）。加 **L1 平滑惩罚**：仅对相邻**非静止**区间对 (k,k+1) 引入 `p_k≥|c_k−c_{k+1}|`（两条 LP 不等式，`c_k=(b_k−b_{k-1})/Δ_k` 仿射于 b），目标 `+= λ·Σp_k`。
+
+- `SolveOptions.smooth_c_weight`（默认 0）+ `config.load_smooth_c_weight` 读 `comm_paras.yaml` 的 `objective.smooth_c_weight`。**用户最终设 0.005**（我建议的轻量值；0.05 太强）。
+- 实测：λ=0.05 → 中段 Σ|Δc| 降 ~99%（6053→52）、t_final +20.8%；λ=0.005 属轻量（时间代价数个百分点）。**仅非静止段参与**（静止段 c 发散、用 jerk-ZOH）。保持纯 LP、不影响可行性/收敛证明。
+
+### 9. 设计文档补全（`docs/robot_copp_design.md`）
+
+- **§7.2⑤**：新增 c 平滑惩罚的公式与说明（LP 不等式 + 目标项 + 实测权重表 + 落地位置）。
+- **§7.0（新）"本仓库实际求解的完整离散 LP（权威形式）"**：一次性写全**决策变量 / 目标函数 / 全部约束**（边界、非静止动力学、静止 Box I、速度上界、轴向加速度、jerk 线性化、力矩盒式、t–n、PLP 割线/下界、c 平滑），每条标注 `ConstraintFlags` 开关与论文式号，逐条对应代码。
+- **§7.0 t–n 描述更正**（用户指出有误）：从含糊的"√a SCP 线性化"改为正确归属**论文（Ardeshiri 2010）凸化方法**——核心是改写到 `(τ,q̇²)` 平面（因 `q̇²=q'²·a` 线性于 a，故约束仿射于 a，论文式 17→18），√a 的 SOCP/切线处理只是 LP 落地细节；引用 `tn_constraint_notes.md §5/§8/§11`。
+- 另：`tn_constraint_notes.md` 本身在本会话创建并扩充（§8 粘滞/库仑摩擦如何并入：Fv 进斜率、Fc 进截距；§11 落地实现）；`README_M1.md` 同步更新（七类约束、t–n 节、五张图、test_copp、lp_problem 行）。
+
+### 10. 当前测试与 git 状态
+
+- `pytest -q`（testpaths = copp/self-test + path/self-test）→ **3/3 通过**。`planner/self-test/test_planner.py` 仍是 Session 2 遗留的未通过项（未收进 testpaths），本会话未碰。
+- 本会话**未 commit**（遵循"仅用户明确要求才提交"）。`git status` 有大量修改 + `test_copp.py`（由 `git mv` 改名）。
+- 用户手动改了两处配置：`robot_ur5.yaml` `tau_scale: 5.0`、`comm_paras.yaml` `objective.smooth_c_weight: 0.005`（均属正常调参，勿回退）。
+
+### 11. 交接提醒
+
+- t–n 约束的 √a 线性化用**切线上界(系数≥0)/过原点割线下界(系数<0)**，跳过静止段；若改走 SOCP（`mode='socp'` 预留、未实现）则 √a 可精确、退化为论文原式。深改前先读 `constraints/ingest.py::speed_torque_constraints` + `docs/tn_constraint_notes.md`。
+- Fig.4/所有 output 图**必须来自唯一用例** `(data, profile)`——不要再引入单独示意数据（用户明确要求唯一性）。
+- 合成参数（`torque_coeffs` 对角近似、t–n 的 Fv/Fc/ω0、amax/jmax、tau_scale）都不是真实 UR5 规格，代码/YAML/文档均有可信度标注。
+
+---
+
+## Session 2（2026-07-12 ～ 2026-07-13）：git 落地 + UR5 真实机器人 + M2 指令/降维层 + planner 门面（进行中）
+
+### 0. 背景
+
+Session 1 的导出文档来自另一个仓库（Rust `copp` 库项目），当时只产出了设计文档、无可运行代码。`robot_copp` 是**独立的新仓库**：Session 1 的 handoff 被复制进来做背景参考后，项目在这里独立演进，M1 数值内核（TOTP-SPLP）+ M4 约束扩展（TCP 速度、关节力矩）已经先于本次会话被实现并可跑（合成的 3 轴 stand-in 机器人）。本次会话开始时仓库还**没有接入 git**。
+
+### 1. Git 落地
+
+初始化仓库、创建首个 commit、推送到 `https://github.com/taoheng6923-lang/robot_copp`（用户账号 `taoheng6923-lang`）。此环境本机没有装 Git，先用 `winget install Git.Git` 装好，再 `git init` + 设置本地 `user.name/user.email`（`taoheng6923` / `taoheng6923@users.noreply.github.com`）+ 提交 + 推送（首次推送经 Git Credential Manager 弹窗登录）。
+
+### 2. 顶层文件夹层级：三轮重构
+
+**第一轮**（在 `copp/` 包内部按 `python_framework.md` §2 的目标结构对齐）：把原来平铺在 `copp/` 下的 `limits.py`+`constraints.py` 拆成 `constraints/`（`model.py`=`RobotLimits`、`ingest.py`=TCP/力矩摄入函数）子包；`flags.py` 改名 `options.py`（`ConstraintFlags`）；为尚未实现的里程碑模块（`commands/`、`blending/`、`lowering/`、`hlaw/`、`synth/`、`planner.py`）建了空的占位目录/文件（只有 docstring，无实现代码——用户当时明确要求"只设计文件夹层级，不需要具体实现"）。
+
+**第二轮**（用户要求把"路径构造"和"copp 核心"拆成不同顶层模块，新增 controller 模块，robot 独立成模块）：
+
+- 新建 `trajectory-planning/`（**纯目录容器，不是 Python 包**——无 `__init__.py`，且目录名含连字符不能作为合法模块名）
+- `copp/`（原顶层）→ 移入 `trajectory-planning/copp/`；`copp/__init__.py` 去掉了对 robot 的 re-export（保持数值核心不反向依赖机器人本体）
+- 原 `copp/commands`、`copp/blending`、`copp/lowering` 三个占位包 → 移到新建的顶层 `pathgen/`（用户又要求改名为 `path/`，二者都放进 `trajectory-planning/`）
+- 原 `copp/hlaw`、`copp/synth`、`copp/planner.py` → 移到新建的顶层 `controller/`（用户要求改名为 `planner/`，同样放进 `trajectory-planning/`）
+- `copp/robot/` → 独立成顶层 `robot/`（不再嵌套在 copp 下）
+- 每次移动都同步改了内部 import（尤其 `sys.path` 拼接的相对层数）、`pyproject.toml` 的 `packages`/`testpaths`，并加了 `pythonpath = [".", "trajectory-planning"]` 让 `path`/`copp`/`planner` 三个顶层包和 `robot`（不在 trajectory-planning 下）都能被找到
+
+**第三轮**（测试目录规范化）：`tests/` 挪到 `copp/self-test/`（改名 `self-test`）；生成的分析图目录几经调整，最终定为各自 `self-test/output/`（例如 `trajectory-planning/copp/self-test/output/`），而不是仓库级的 `output/` 或 `test2/`。
+
+三轮重构后的最终结构：
+
+```
+robot/                          顶层，独立：机器人本体（ur5.py）
+trajectory-planning/            纯目录容器（非 python 包）
+├── copp/                       纯 TOTP-SPLP 数值核心（M1+M4，已实现）
+│   └── self-test/              test_copp.py（原 test_splp_kernel.py）+ output/
+├── path/                       路径构造（M2 已实现 commands+lowering；blending=M3 占位）
+│   └── self-test/              test_lowering.py、test_commands.py + output/
+└── planner/                    调度/合成/门面（本次会话进行中；hlaw=M5 占位）
+    └── self-test/              test_planner.py（未完全通过，见下）+ output/
+```
+
+### 3. 机器人模型换成真实 UR5（`robot/ur5.py`）
+
+删除了旧的 `SyntheticRobotModel`（与关节数无关的合成 3 轴 stand-in），新增：
+
+- **`UR5Kinematics`**：标准 DH 参数表（Universal Robots 官网权威数据，已用 WebFetch 核实）。`fk`/`jacobian` 是解析解（用有限差分交叉验证到 ~1e-10）。`ik` 最初实现是阻尼最小二乘（DLS）数值迭代，后来被扩展/替换成**闭式解析逆解**（Andersen 标准 DH 推导，θ1×θ5×θ3 枚举全部 ≤8 支路，逐关节 2π 折叠后取离 seed 最近解，O(1) 求解，比 DLS 快 1~2 个数量级），DLS 降级为退化位形（腕奇异/不可达）的兜底——已用 200 组随机位形数值验证到 ~1e-13。**注意**：这部分解析 IK 代码是在系统提醒里以"用户或 linter 修改"的形式出现的，我没有亲眼看到实现过程，接手前建议自己跑一遍验证（`robot/ur5.py` 里的 `_ik_analytic` 方法）。
+- **`UR5RobotModel`**：`joint_path` 仍是合成随机轨迹（占位，因为路径生成层此时还没做出来），但 `tcp_geometry`/`tcp_coeffs` 已改用真实 `UR5Kinematics.jacobian(q)` 沿该合成路径求值（不再是与关节角无关的虚构公式）；`torque_coeffs` 是"下游集中质量单摆臂"近似（基于 ROS-Industrial `ur5.urdf.xacro` 公开的连杆质量/长度），不是精确 RNE。
+- **逐关节限值数据来源**（在 `robot/ur5.py` docstring 和 `configs/robot_ur5.yaml` 注释里都做了三档可信度标注，避免被误当真实规格）：
+  - `tau_max=[54,150,150,28,28,9]` Nm —— **官方权威**（Universal Robots 官网 "Max. joint torques CB3 and e-Series"）
+  - `vmax=[3.15,3.15,3.15,3.2,3.2,3.2]` rad/s —— 来自 ROS-Industrial `ur5.urdf.xacro` 的 `<limit velocity=.../>`（驱动真实 UR5 硬件的社区描述文件，可信但非 UR 官方数据表原文；一开始用的是错误的"统一 180°/s 近似"，后来查证后改成了逐关节的真实值）
+  - `amax`/`jmax` —— **无任何官方或社区公开数据**，按 vmax 的经验比例臆造，仅供数值示例
+
+### 4. `copp/viz.py` 限位线修正
+
+原来三处约束线画的是"跨关节 max/min 包络"（比如力矩面板画一条 ±150Nm 的线），对 UR5 这种逐关节力矩上限差异巨大（9~150Nm）的真实机器人是**误导性的**——wrist3 实际上限只有 9Nm，画在 150Nm 包络线下会显得还有巨大裕度。改成逐关节按自己的配置值画、与该关节曲线同色的虚线。已用数值检查确认（关节 1 精确顶到 -150.00Nm 绑定，不是越界）。
+
+### 5. 文档整理
+
+填了此前完全空白的根 `README.md`（项目一句话定位 + 当前状态 + 快速开始 + 目录结构 + **文档索引表**：每份文档是什么、权威性如何——这是之前最缺的东西，6+ 份文档之间没有任何导航）；修了 `CLAUDE.md` 里已经不存在的 `pytest tests/ -q` 命令；`docs/README_M1.md`、`docs/robot_copp_design.md`、`docs/python_framework.md` 都补了"与实际实现的差异"提示框，指向真正如实反映代码的文档。
+
+### 6. M2 层实现：`path/lowering/` + `path/commands/`（本次会话主要工作量）
+
+**`path/types.py`**：`CartesianSamples`（位姿 + 1~3 阶导采样）、`CartesianPath`/`JointSpacePath` protocol、`PathDerivatives`（q/dq/ddq/dddq + cv/cw，可直接喂 `RobotLimits.to_topp3_data`）。
+
+**`path/lowering/`**：
+- `sampling.py` —— 曲率驱动自适应采样（弦高误差模型 e≈‖r''‖Δs²/8，网格强制含 `s_breaks`）
+- `ik.py` —— 连续解 IK（seed 链）+ FK 回代校验 + 相邻站点跳变校验
+- `derivatives.py` —— Jacobian 链式法则求 q'/q''/q'''（J'/J'' 用方向有限差分）。**修正了设计文档 `robot_copp_design.md` §5.3 的一个公式错误**：三阶式漏写了系数 2，正确式是 `Jq''' = r₃ − 2·J'q'' − J''q'`（对 `Jq'=r₁` 逐阶求导两次得到）。这个错误如果照抄设计文档实现，在自测里会体现为 O(10%) 量级的三阶导交叉验证失败——已在代码注释和 `docs/README_M2.md` 里记录。
+- `singularity.py` —— σ_min/σ_max 奇异检测 + 阻尼最小二乘逆
+
+**`path/commands/`**：`JointMoveCommand`（**有意偏离设计文档**：用线性关节几何而非设计文档 §3.1 的五次多项式——理由是 TOPP 框架下几何与时间律解耦，时间平滑由 copp 时间律保证，五次多项式反而会让端点 q'(s)=0 使参数化退化）、`LinearMoveCommand`（直线+SLERP，纯姿态调整退化安全）、`CircularMoveCommand`（三点定圆/圆心+法向，弧长参数化）、`assemble.py`（`build_sections`+`lower_sections`：G0 精确衔接校验 + IK seed 链逐段降维）。M2 语义：**段间无 blending**，角点用停顿衔接，每段独立 rest-to-rest 求解（G2 平滑过渡是 M3）。
+
+每层都写了高强度自测（`test_lowering.py`、`test_commands.py`），核心原则是**不相信被测代码自己的输出**，大量用独立手段交叉验证：解析测试路径先用有限差分自检推导对不对、q 序列有限差分反推 dq/ddq/dddq、独立网格差分验证 Jacobian 恒等式 J'q'+Jq''≈r₂、退化情形（纯姿态调整 p'≡0、共线圆弧、零长指令）显式报错。
+
+`docs/README_M2.md` 已写好，如实记录了上述内容。
+
+### 7. t–n（转矩–转速）速度相关力矩约束
+
+这部分是**用户直接推进补充的**（我在系统提醒里看到大量"文件被用户或 linter 修改"的通知，没有亲眼见证实现过程，只读到了最终结果）：
+
+- `docs/tn_constraint_notes.md`：精读 Ardeshiri et al. 2010 论文（*Convex Optimization approach for Time-Optimal Path Tracking of Robots with Speed Dependent Constraints*），梳理"电机转矩上限随转速下降"这类速度相关约束如何在不破坏凸性的前提下并入 TOPP 凸优化——核心是把约束改写成仿射于 `(τ, q̇²)` 而不是仿射于 `q̇` 本身。**这正是用户中途打断时问的"非凸约束切一角转成凸约束的参数设置"**：约束原式含 √a（非凸，a 是路径速度平方），按 SPLP 一贯的序列线性化思路，在当前迭代点 `a_lin` 处对 √a 取**切线上界**（保守内逼近，"切掉"了非凸可行域超出切线的那一角），随迭代收敛到精确解——与 jerk 约束用的是同一套线性化机制（论文 eq.32 那种手法），只是这次用在速度相关力矩上。
+- 落地：`types.SpeedTorqueConstraint` + `constraints/ingest.speed_torque_constraints` + `ConstraintFlags.speed_torque`，约束形式 `|τ_dyn + Fv·q̇ + Fc·sgn(q̇)| ≤ τ0 − κ·|q̇|`（κ=反电动势斜率、Fv=粘滞摩擦、Fc=库仑摩擦，τ0 复用 tau_max）。
+- 参数（`emf_slope`/`viscous`/`coulomb`）逐关节配在 `configs/robot_ur5.yaml`，同样标注"合成臆造，无官方数据"（κ=0.45·τ_max/vmax、Fv=0.4κ、Fc=0.03·τ_max 这类经验比例）。
+- 原来的 `test_splp_kernel.py` 改名成了 `test_copp.py`。
+
+### 8. planner 门面 + synth 层（本次会话进行中，**未完成**）
+
+这是被用户提问打断时正在做的工作：
+
+- **`planner/synth/resample.py`**：`synthesize`（单段：在 copp 的解析细剖面——`fine_profiles`，Prop.1 c-ZOH + Prop.2 静止段 jerk-ZOH 闭式——上重构 q̇/q̈/q⃛ 到等时间栅格）+ `concatenate`（多段按时间顺序拼接，段间 rest 停顿衔接）+ `TrajectoryResult` 数据类。
+- **`planner/synth/verify.py`**：`verify_limits`（超限率 R_v / 超限时长比 D_v，论文 §6.1.2 的验收指标）+ `VerifyMetrics`。
+- **`planner/planner.py`**：`TrajectoryPlanner` 门面类——`add_command()` 累积指令（链式调用），`plan(q_seed)` 一次性跑完 `build_sections → lower_sections → 逐段 solve_splp → synthesize → concatenate → verify_limits`。多段规划会检查 `limits.a_bnd/b_bnd` 必须是静止边界（M2 段间停顿语义的前提），否则报错。
+- **`planner/self-test/test_planner.py`**：JointMove+LinearMove+CircularMove 三段混合指令端到端自测（结构性质、rest-to-rest 连续性、FD 交叉验证、约束校验器灵敏度、防误用断言）。
+
+**过程中发现并修复的一个真实 bug**：`copp/solve/interp.py` 的 `_segment_tail_static`（静止尾段的细分点采样）原来按 `s` 均匀取点，但静止段 `ṡ ∝ ρ^{2/3}`（ρ 是到 rest 端的距离），导致最后一个细分区间在**时间上**占了整段约 35%——这个非均匀性在等时间栅格插值时会造成明显失真。改成按 `ρ_frac³` 立方分布采样后，`FD(s) 中心差分 vs 解析 ṡ` 的交叉验证从误差 5.2e-2 降到通过阈值。这个 bug 之前没被发现是因为旧的可视化/测试代码都是在**网格点**上重构信号，没有在时间栅格上做过独立的 FD 交叉验证。
+
+**当前卡住、尚未解决的问题**：`test_planner.py` 的 `_assert_verify` 断言"真实限值下应该 R_v=D_v=0"失败，实测 `R_v=0.313`（31% 样本"超限"）。中断前已经用一次性诊断脚本细分到每类约束在不同容差下的超限样本占比，结论是：
+- `velocity`、`acceleration` 完全不超（0%）
+- `jerk`：0 容差下 7.85% 样本超，但全部在 3.4% 以内（`max_util=1.034`）——这大概率是解析细剖面区间内 O(Δ²) 离散化误差的正常范围，不是实现 bug
+- `tcp_velocity`：0 容差下 23.73% 样本超，但全部在 0.06% 以内（`max_util=1.0006`）——是"贴线"而非真超限
+
+**下一步建议先查这个方向**：`verify_limits`/`test_planner.py` 的容差设置可能过严（比如 jerk 用了硬 `1.0` 而没考虑区间内 O(Δ²) 误差界、tcp_velocity 的 0.06% 量级可能只是浮点/插值噪声），而不是去怀疑 `resample.py`/`verify.py` 的实现逻辑有错——已经确认没有真正意义上的大幅超限（最坏情况才超 3.4%）。改完容差后记得把 `trajectory-planning/planner/self-test` 加进 `pyproject.toml` 的 `testpaths`（现在还没加）。
+
+### 9. 当前测试状态
+
+```
+pytest -q   # testpaths = ["trajectory-planning/copp/self-test", "trajectory-planning/path/self-test"]
+```
+→ **3/3 通过**（test_copp、test_lowering、test_commands）。
+
+```
+python trajectory-planning/planner/self-test/test_planner.py
+```
+→ **失败**（`_assert_verify` 断言，见上）。这个测试还没被 `pyproject.toml` 的 `testpaths` 收录，所以 `pytest -q` 目前看不出这个失败。
+
+### 10. Git 状态（本次会话结束时）
+
+最近一次 commit 是 `a818c82 feat: 增加lowering和command层；增加t-n约束及摩擦力约束的文档梳理`（不含 planner 门面这部分工作）。截至本次会话结束，`git status` 显示大量文件已修改，且 `trajectory-planning/planner/synth/resample.py`、`verify.py`、整个 `trajectory-planning/planner/self-test/` 目录都是**未跟踪的新文件**，尚未 commit。
+
+### 11. 关键设计决策速查（避免下次重新讨论）
+
+- `trajectory-planning/` 是纯目录容器，不是 Python 包（含连字符不能作模块名，也没有 `__init__.py`）；`path`/`copp`/`planner` 三个顶层包靠 `pyproject.toml` 的 `[tool.pytest.ini_options] pythonpath = [".", "trajectory-planning"]` 找到彼此，`robot` 靠仓库根（`.`）找到。
+- `copp/` 不反向依赖 `robot/`/`path/`——只通过 `Topp3Data`/`PathDerivatives` 这类纯数据结构交互。
+- M2 无 blending：段间 G0 精确衔接 + 每段独立 rest-to-rest，物理严格可行但非全局时间最优；G2 不停顿平滑过渡是 M3（`path/blending/`，仍是空占位）。
+- IK 用 UR5 闭式解析解（8 支路），非数值迭代法（更快更稳；DLS 只做退化位形兜底）。
+- `torque_coeffs`（对角近似）和 t–n 参数（emf_slope/viscous/coulomb）都是"物理量级合理但非真实测量"的合成近似，反复在代码注释/YAML 注释/文档里标注来源可信度，不能当作真实 UR5 出厂规格使用。
+- 真实动力学（`DynamicsModel`/RNE）、M3 blending、M5 HLAW 均未实现，仍是占位目录。
+
+### 12. 交接提醒
+
+本次会话中，相当一部分文件是以"该文件被用户或 linter 修改"的系统提醒形式出现变化的（UR5 解析 IK、t–n 约束整块、部分文档措辞），我没有亲眼见证实现/推导过程，只是照最终状态做了描述和交叉验证（跑测试、核对公式）。下一次会话如果要深入改这些部分，建议先重新通读一遍相关源码（尤其 `robot/ur5.py::_ik_analytic`、`copp/constraints/ingest.py::speed_torque_constraints`），不要完全依赖本节的文字复述。
+
+---
+
+## Session 1（2026-07-10 导出，另一仓库）：COPP-Python 轨迹规划框架设计（历史存档）
+
+> ⚠️ 以下为项目启动前从另一仓库（Rust `copp` 库项目）导出的会话记录，**当时只产出设计文档、无可运行代码**。`robot_copp` 项目后来独立演进，模块划分、命名、技术选型都已和下文有很大出入（例如：下文设想的单包 `copp_py/` 结构已被 Session 2 的 `robot/`+`trajectory-planning/{copp,path,planner}` 四包结构取代；下文的 `PathSegment`/`PathBuilder` 设计已被 `path/types.py` 的 `CartesianSamples`/`Section` 取代）。仅供了解最初的问题背景与算法参考，**不代表当前设计**——当前设计权威文档见 [`docs/robot_copp_design.md`](../docs/robot_copp_design.md)、[`docs/README_M1.md`](../docs/README_M1.md)、[`docs/README_M2.md`](../docs/README_M2.md)。
 
 > 导出时间：2026-07-10
 > 来源仓库：`e:\CodePrj\CppPri-VScode\0.other_lib_code\copp\copp`（Rust `copp` 库，分支 `feature/wc/add_save_data_plot_script`）

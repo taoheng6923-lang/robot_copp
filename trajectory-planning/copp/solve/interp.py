@@ -116,14 +116,19 @@ def _segment_head_static(u_grid, a_end, ns):
 
 
 def _segment_tail_static(u_grid, a_start, nf):
-    """尾部 N_f 个静止区间作一段 jerk-ZOH。返回 (u, a, b, ubar, tau)。"""
+    """尾部 N_f 个静止区间作一段 jerk-ZOH。返回 (u, a, b, ubar, tau)。
+
+    细分点按 rho_frac³ 向 rest 端聚点（与 _interval_tail_static/头段一致）：
+    ṡ∝ρ^{2/3} 下 t∝L^{1/3}−ρ^{1/3}，ρ 取立方分布使时间近似均匀——否则
+    s-均匀采样的最后一个细分在时间上占整段 (1/24)^{1/3}≈35%，时域插值失真。
+    """
     N = u_grid.size
     ustart, uf = u_grid[N - 1 - nf], u_grid[N - 1]
     L = uf - ustart
     A_f = max(a_start, _A_FLOOR) / L ** (4.0 / 3.0)
-    frac = np.linspace(0.0, 1.0, nf * _SUB + 1)
-    u_seg = ustart + L * frac
-    rho = uf - u_seg
+    rho_frac = np.linspace(1.0, 0.0, nf * _SUB + 1) ** 3
+    u_seg = ustart + L * (1.0 - rho_frac)
+    rho = L * rho_frac
     a_sig = np.maximum(A_f * rho ** (4.0 / 3.0), _A_FLOOR)
     b_sig = -(2.0 / 3.0) * A_f * rho ** (1.0 / 3.0)
     ub_sig = np.full_like(u_seg, (2.0 / 9.0) * A_f ** 1.5)

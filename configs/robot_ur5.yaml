@@ -10,7 +10,9 @@
 #
 # 数据来源（准确度分三档，逐条标注，勿混为同一可信度）：
 #   - tau_max：Universal Robots 官网 "Max. joint torques CB3 and e-Series"
-#     —— **官方权威**：base 54, shoulder 150, elbow 150, wrist1/2 28, wrist3 9 Nm。
+#     —— **官方权威**：base 54, shoulder 150, elbow 150, wrist1/2 28, wrist3 9 Nm（下方 joints 即官方值）。
+#     顶层 `tau_scale` 对所有关节 tau_max（及复用它的 t–n 平台 τ0、对称下界 tau_min）统一乘倍——
+#     实验用，放开力矩余量、观察进给能否 ramp 到 rolloff 段；tau_scale=1 即官方值。
 #   - vmax：ROS-Industrial `universal_robot` 仓库 `ur5.urdf.xacro` 的
 #     `<limit velocity=.../>` —— **社区维护、驱动真实 UR5 硬件的描述文件**
 #     （可信但非 UR 官方数据表原文）：base/shoulder/elbow 3.15 rad/s，
@@ -19,9 +21,21 @@
 #     均只给速度/力矩限，不含加速度/jerk）。此处按各关节 vmax 的 10×/200×
 #     经验比例**臆造**（与 demo_3axis 配置同一比例惯例），仅供数值示例，
 #     不代表真实机器人规格——若需要真实值需另行实测或查阅厂商未公开资料。
+#   - noload_speed / viscous / coulomb（速度相关力矩 t–n 的空载转速 ω0、粘滞 Fv、库仑 Fc）：
+#     **无任何官方或社区公开数据**，按合成量级**臆造**。t–n 可用力矩为**梯形**包络：
+#       平台 τ_env=τ0 直到拐点 ω_c（=本表 vmax），再线性收窄到 0 于空载转速 ω0（=noload_speed）。
+#     故 ω0 才是该轴真实速度上限（>vmax）；**启用 t–n 时轴速上界自动取 ω0**（vmax 退化为拐点，
+#     仅在 t–n 关闭时作速度上限）。约束 |τ_dyn+Fv·q̇+Fc·sgn(q̇)| ≤ τ_env(|q̇|)；τ0 复用 tau_max。
+#     此处取 ω0 = 1.6·vmax（拐点后留 0.6·vmax 的收窄区）；Fv/Fc 见各关节值（合成）。
+#     开关在 comm_paras.yaml 的 constraints.speed_torque；理论/推导见 docs/tn_constraint_notes.md。
+#     改 t–n 松紧只改本节：ω0↓（收窄更陡）或摩擦↑ → 约束更严。
 
 name: ur5
 n_axis: 6
+
+# 力矩倍率：对所有关节 tau_max（及复用它的 t–n 平台 τ0、对称下界 tau_min）统一乘此系数。
+#   实验用（放开力矩余量看效果）——1.0=官方值；缺省 1.0。仅缩放力矩，不动 vmax/摩擦/ω0。
+tau_scale: 5.0
 
 # 路径两端 a=ṡ²、b=s̈ 边界。
 #   a_bnd=(0,0) 即 rest-to-rest（首末速度严格为 0）；零进给奇异由 Prop.2 静止段
@@ -32,34 +46,54 @@ boundary:
 
 # 逐关节约束，顺序：base / shoulder / elbow / wrist1 / wrist2 / wrist3。
 # tau_min 省略，缺省取 -tau_max（对称力矩）。
+# noload_speed/viscous/coulomb 为速度相关力矩（t–n）参数（合成，见上方数据来源说明）；
+# 整体缺省则不启用 t–n 约束（须所有关节都给或都不给）。拐点 ω_c=vmax、τ0=tau_max。
 joints:
   - name: base
     vmax: 3.15
     amax: 31.5
     jmax: 630.0
-    tau_max: 54.0
+    tau_max: 54.0         # 官方值（顶层 tau_scale 统一乘倍）
+    noload_speed: 5.04    # ω0 = 1.6·vmax（拐点 3.15 → 空载 5.04，力矩线性到 0）
+    viscous: 0.26         # Fv（合成，未随力矩翻倍缩放）
+    coulomb: 1.62         # Fc（合成，未随力矩翻倍缩放）
   - name: shoulder
     vmax: 3.15
     amax: 31.5
     jmax: 630.0
-    tau_max: 150.0
+    tau_max: 150.0        # 官方值（顶层 tau_scale 统一乘倍）
+    noload_speed: 5.04
+    viscous: 0.71
+    coulomb: 4.5          # Fc（合成，未随力矩翻倍缩放）
   - name: elbow
     vmax: 3.15
     amax: 31.5
     jmax: 630.0
-    tau_max: 150.0
+    tau_max: 150.0        # 官方值（顶层 tau_scale 统一乘倍）
+    noload_speed: 5.04
+    viscous: 0.71
+    coulomb: 4.5
   - name: wrist1
     vmax: 3.2
     amax: 32.0
     jmax: 640.0
-    tau_max: 28.0
+    tau_max: 28.0         # 官方值（顶层 tau_scale 统一乘倍）
+    noload_speed: 5.12    # ω0 = 1.6·vmax
+    viscous: 0.13
+    coulomb: 0.84         # Fc（合成，未随力矩翻倍缩放）
   - name: wrist2
     vmax: 3.2
     amax: 32.0
     jmax: 640.0
-    tau_max: 28.0
+    tau_max: 28.0         # 官方值（顶层 tau_scale 统一乘倍）
+    noload_speed: 5.12
+    viscous: 0.13
+    coulomb: 0.84
   - name: wrist3
     vmax: 3.2
     amax: 32.0
     jmax: 640.0
-    tau_max: 9.0
+    tau_max: 9.0          # 官方值（顶层 tau_scale 统一乘倍）
+    noload_speed: 5.12
+    viscous: 0.04
+    coulomb: 0.27

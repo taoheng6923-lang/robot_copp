@@ -45,8 +45,11 @@ def load_robot_limits(
     v_tcp_max : TCP 位置速度模上界（给定，不在配置文件里）。None 表示不设。
     w_tcp_max : TCP 姿态角速度模上界（给定）。None 表示不设。
 
-    读取字段：joints[].{vmax,amax,jmax,tau_max?,tau_min?}、boundary.{a_bnd,b_bnd}。
-    tau_min 缺省取 -tau_max；力矩字段整体可缺（则不启用力矩上下界）。
+    读取字段：顶层 {n_axis?,tau_scale?}、joints[].{vmax,amax,jmax,tau_max?,tau_min?,noload_speed?,
+    viscous?,coulomb?}、boundary.{a_bnd,b_bnd}。tau_min 缺省取 -tau_max；力矩字段整体可缺（则不启用
+    力矩上下界）。tau_scale（缺省 1.0）统一缩放 tau_max/tau_min（及复用 tau_max 的 t–n 平台 τ0）。
+    noload_speed（空载转速 ω0）给全才启用速度相关力矩（t–n）：τ0 复用 tau_max、拐点 ω_c 取 vmax、
+    viscous/coulomb 缺省 0。
     """
     import yaml
 
@@ -65,8 +68,17 @@ def load_robot_limits(
     jmax = _joint_field(joints, "jmax")
     tau_max = _joint_field(joints, "tau_max", required=False)
     tau_min = _joint_field(joints, "tau_min", required=False)
-    if tau_max is not None and tau_min is None:
-        tau_min = -tau_max  # 对称力矩
+    # 顶层力矩倍率 tau_scale：统一乘 tau_max（及 t–n 平台 τ0）与 tau_min（实验用；缺省 1.0）
+    tau_scale = float(cfg.get("tau_scale", 1.0))
+    if tau_scale <= 0:
+        raise ValueError(f"tau_scale 须为正，得到 {tau_scale}")
+    if tau_max is not None:
+        tau_max = tau_max * tau_scale
+        tau_min = -tau_max if tau_min is None else tau_min * tau_scale  # 缺省对称，否则同步缩放
+    # 速度相关力矩（t–n）：空载转速 ω0 / 粘滞 Fv / 库仑 Fc（整体可缺；τ0=tau_max、ω_c=vmax）
+    noload_speed = _joint_field(joints, "noload_speed", required=False)
+    viscous = _joint_field(joints, "viscous", required=False)
+    coulomb = _joint_field(joints, "coulomb", required=False)
 
     bnd = cfg.get("boundary", {}) or {}
     a_bnd = tuple(float(x) for x in bnd.get("a_bnd", (0.0, 0.0)))
@@ -76,6 +88,7 @@ def load_robot_limits(
         vmax=vmax, amax=amax, jmax=jmax, a_bnd=a_bnd, b_bnd=b_bnd,
         v_tcp_max=v_tcp_max, w_tcp_max=w_tcp_max,
         tau_max=tau_max, tau_min=tau_min,
+        st_noload_speed=noload_speed, st_viscous=viscous, st_coulomb=coulomb,
     )
 
 
@@ -95,16 +108,6 @@ def load_constraint_flags(path: str | os.PathLike | None = None):
     return ConstraintFlags.from_dict(load_comm_paras(path).get("constraints", {}))
 
 
-def load_fig4_example(path: str | os.PathLike | None = None) -> dict:
-    """从全局参数取 `fig4_example` 节，返回可直接传给 viz.fig4_interpolation_example 的 dict。
-
-    字段：n_stat（恒定参数 jerk 宽度 N_s）、du、a_head、n_sub、c_tail。
-    """
-    cfg = load_comm_paras(path).get("fig4_example", {})
-    return {
-        "n_stat": int(cfg["n_stat"]),
-        "du": float(cfg.get("du", 1.0)),
-        "a_head": float(cfg.get("a_head", 0.6)),
-        "n_sub": int(cfg.get("n_sub", 80)),
-        "c_tail": tuple(float(x) for x in cfg["c_tail"]),
-    }
+def load_smooth_c_weight(path: str | os.PathLike | None = None) -> float:
+    """从全局参数取 `objective.smooth_c_weight`（非静止段 c 平滑惩罚权重 λ）；缺省 0.0。"""
+    return float(load_comm_paras(path).get("objective", {}).get("smooth_c_weight", 0.0))

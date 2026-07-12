@@ -21,7 +21,8 @@ class ConstraintFlags:
     velocity             轴向速度 |q̇|≤vmax
     acceleration         轴向加速度 |q̈|≤amax
     jerk                 轴向 jerk |q⃛|≤jmax（3 阶）
-    torque               关节力矩 τ_min≤τ≤τ_max
+    torque               关节力矩 τ_min≤τ≤τ_max（恒定盒式）
+    speed_torque         速度相关力矩（t–n：反电动势+粘滞/库仑摩擦）
     tcp_velocity         TCP 位置速度模 ‖ṗ‖≤v_tcp_max
     tcp_angular_velocity TCP 姿态角速度模 ‖ω‖≤w_tcp_max
     """
@@ -30,6 +31,7 @@ class ConstraintFlags:
     acceleration: bool = True
     jerk: bool = True
     torque: bool = True
+    speed_torque: bool = True
     tcp_velocity: bool = True
     tcp_angular_velocity: bool = True
 

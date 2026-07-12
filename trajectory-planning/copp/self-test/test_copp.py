@@ -1,11 +1,14 @@
-"""M1 SPLP 数值内核端到端测试（framework §8）。
+"""copp 数值内核端到端测试（framework §8）。
 
-**单一测试用例**：一次求解 + 全部断言 + 同时输出三张分析图，便于对照分析问题：
-  output/splp_test.png          —— SPLP 概览（收敛 / 速度剖面 / 约束利用率 / 时间律…）
-  output/splp_limits_test.png   —— 关节速度/加速度/jerk/力矩 + TCP 速度模（带约束）
-  output/fig4_interpolation.png —— 论文 Fig.4 复现（区间解析插值 Prop.1 + Prop.2）
+**唯一测试用例** test_copp：一次求解得 (data, profile)，全部断言 + 由**同一求解结果**输出五张
+分析图——output/ 下所有图像均来自该唯一用例，不另造示意数据：
+  output/splp_test.png               —— SPLP 概览（收敛 / 速度剖面 / 约束利用率 / 时间律…）
+  output/splp_limits_test.png        —— 关节速度/加速度/jerk/力矩 + TCP 速度模（带约束）
+  output/speed_torque_test.png       —— 速度相关力矩（t–n）：转矩–转速包络 / 利用率 / 摩擦分量
+  output/tn_convexification_test.png —— 论文 Fig.3：逐关节 (q̇²,τ) 真实非凸域 vs 仿射切角内逼近
+  output/fig4_interpolation.png      —— 论文 Fig.4 风格：本用例轨迹全程 a/b/c/参数jerk 解析重构
 
-可用 pytest 运行，也可直接 `python trajectory-planning/copp/self-test/test_splp_kernel.py`。
+可用 pytest 运行，也可直接 `python trajectory-planning/copp/self-test/test_copp.py`。
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ import numpy as np
 
 from copp import (
     Topp3Data, ConstraintFlags, solve_splp, SolveOptions,
-    load_robot_limits, load_fig4_example, load_constraint_flags,
+    load_robot_limits, load_constraint_flags, load_smooth_c_weight,
 )
 from copp.solve import s_to_t
 from robot import UR5RobotModel
@@ -97,6 +100,13 @@ def _assert_solver(data, profile, hist, flags=ConstraintFlags()):
         assert np.all(tau <= data.torque.tau_max[:, None] + 1e-3)
         assert np.all(tau >= data.torque.tau_min[:, None] - 1e-3)
         binders.append(float(np.max(np.abs(tau) / data.torque.tau_max[:, None])))
+    # 速度相关力矩（t–n）：回代**真实（未凸化）**约束，利用率≤1、可用力矩恒正、且绑定
+    if flags.speed_torque:
+        from copp.viz import speed_torque_signals
+        sig_st = speed_torque_signals(data, profile)
+        assert np.all(sig_st["tau_avail"] > 0), "可用力矩 τ_env(|q̇|) 应恒为正"
+        assert sig_st["util"].max() <= 1.0 + 2e-3, sig_st["util"].max()
+        binders.append(float(sig_st["util"].max()))
 
     # 至少一个启用的约束真正绑定（否则用例无意义）
     assert binders and max(binders) >= 0.5, binders
@@ -120,32 +130,23 @@ def _assert_config(flags):
     assert raised, "未知约束开关应报错"
 
 
-def _assert_fig4(ex, cfg):
-    """Fig.4 示意：静止起点 + 非静止终点 + 头部恒定参数 jerk。"""
-    assert ex["a_grid"][0] == 0.0 and ex["b_grid"][0] == 0.0
-    assert ex["a_grid"][-1] > 0.0 and ex["b_grid"][-1] != 0.0
-    head = ex["j_fine"][ex["u_fine"] < ex["u_stat"] - 1e-9]  # 头尾共享 u_stat，严格小于只取头部
-    assert np.allclose(head, ex["kappa"], rtol=1e-6)
-    assert abs(ex["a_grid"][cfg["n_stat"]] - cfg["a_head"]) < 1e-9
-
-
-def test_splp_kernel():
-    """端到端单一用例：求解 + 断言 + 输出三张分析图（无 matplotlib 则仅跳过出图）。"""
+def test_copp():
+    """唯一端到端用例：求解 → 断言 → 由同一 (data, profile) 输出五张分析图（无 matplotlib 则跳过出图）。"""
     # ── 求解（约束开关取自 configs/comm_paras.yaml）────────────────────
     flags = load_constraint_flags()
     data = _make_data()
-    profile, hist = solve_splp(data, SolveOptions(n_iter=6, flags=flags))
+    profile, hist = solve_splp(data, SolveOptions(
+        n_iter=6, flags=flags, smooth_c_weight=load_smooth_c_weight()))
 
     # ── 断言 ──────────────────────────────────────────────────────────
     _assert_config(flags)
     _assert_solver(data, profile, hist, flags)
-    cfg = load_fig4_example()
 
-    # ── 出图（三张，落 self-test/output/，每次覆盖）────────────────────
+    # ── 出图（全部来自唯一用例数据，落 self-test/output/，每次覆盖）──────
     try:
         from copp.viz import (
-            plot_splp_result, plot_kinematic_limits,
-            fig4_interpolation_example, plot_fig4_interpolation,
+            plot_splp_result, plot_kinematic_limits, plot_speed_torque,
+            plot_tn_convexification, plot_interp_profiles,
         )
     except ImportError:
         print("SKIP 出图部分（matplotlib 未安装）")
@@ -169,15 +170,26 @@ def test_splp_kernel():
     assert os.path.exists(out2) and os.path.getsize(out2) > 0
     plt.close(fig2)
 
-    # 图 3：论文 Fig.4 复现（区间解析插值）——参数取自 comm_paras.yaml
-    ex = fig4_interpolation_example(**cfg)
-    _assert_fig4(ex, cfg)
-    out3 = os.path.join(out_dir, "fig4_interpolation.png")
-    fig3 = plot_fig4_interpolation(ex, save_path=out3, show=False)
-    assert os.path.exists(out3) and os.path.getsize(out3) > 0
-    plt.close(fig3)
+    # 图 3：速度相关力矩（t–n）分析——转矩–转速包络 / 约束利用率 / 摩擦分量
+    if flags.speed_torque and data.speed_torque is not None:
+        out3 = os.path.join(out_dir, "speed_torque_test.png")
+        fig3 = plot_speed_torque(data, profile, save_path=out3, show=False)
+        assert os.path.exists(out3) and os.path.getsize(out3) > 0
+        plt.close(fig3)
+
+        # 图 3b：论文 Fig.3 复现——逐关节 (q̇², τ) 平面的真实非凸可行域 vs 仿射切角内逼近
+        out3b = os.path.join(out_dir, "tn_convexification_test.png")
+        fig3b = plot_tn_convexification(data, profile, save_path=out3b, show=False)
+        assert os.path.exists(out3b) and os.path.getsize(out3b) > 0
+        plt.close(fig3b)
+
+    # 图 4：论文 Fig.4 风格——由本用例 profile 全程解析重构 a/b/c/参数jerk（覆盖全部插补周期）
+    out4 = os.path.join(out_dir, "fig4_interpolation.png")
+    fig4 = plot_interp_profiles(data, profile, save_path=out4, show=False)
+    assert os.path.exists(out4) and os.path.getsize(out4) > 0
+    plt.close(fig4)
 
 
 if __name__ == "__main__":
-    test_splp_kernel()
-    print("PASS test_splp_kernel")
+    test_copp()
+    print("PASS test_copp")

@@ -8,19 +8,19 @@ M1 数值内核 + M4 约束扩展（TCP 速度、关节力矩）。详见 python
 §9 里程碑与 robot_copp_design.md §7。
 """
 
-from .types import Topp3Data, Profile, TcpConstraint, TorqueConstraint
+from .types import Topp3Data, Profile, TcpConstraint, TorqueConstraint, SpeedTorqueConstraint
 from .constraints import RobotLimits
 from .options import ConstraintFlags
 from .config import (
-    load_robot_limits, load_comm_paras, load_fig4_example, load_constraint_flags,
+    load_robot_limits, load_comm_paras, load_constraint_flags, load_smooth_c_weight,
     DEFAULT_CONFIG, DEFAULT_COMM_CONFIG,
 )
 from .solve.splp import solve_splp, SolveOptions
 
 __all__ = [
-    "Topp3Data", "Profile", "TcpConstraint", "TorqueConstraint",
+    "Topp3Data", "Profile", "TcpConstraint", "TorqueConstraint", "SpeedTorqueConstraint",
     "RobotLimits", "ConstraintFlags",
-    "load_robot_limits", "load_comm_paras", "load_fig4_example", "load_constraint_flags",
+    "load_robot_limits", "load_comm_paras", "load_constraint_flags", "load_smooth_c_weight",
     "DEFAULT_CONFIG", "DEFAULT_COMM_CONFIG",
     "solve_splp", "SolveOptions",
 ]

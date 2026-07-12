@@ -105,9 +105,15 @@ def velocity_upper_bound(data: Topp3Data, flags=None) -> np.ndarray:
     a_bar = np.full(N, np.inf)
 
     if flags.velocity:
+        # 启用 t–n 时轴速上界取空载转速 ω0（力矩→0 处，体现在 t–n 曲线里），
+        # 比不考虑 t–n 的保守 vmax 更大；否则用 vmax。
+        if flags.speed_torque and data.speed_torque is not None:
+            vcap = data.speed_torque.noload_speed
+        else:
+            vcap = data.vmax
         dq2 = data.dq**2  # (n, N)
         with np.errstate(divide="ignore", invalid="ignore"):
-            bound = (data.vmax[:, None] ** 2) / dq2  # (n, N)
+            bound = (vcap[:, None] ** 2) / dq2  # (n, N)
         bound[~np.isfinite(bound)] = np.inf
         a_bar = np.minimum(a_bar, bound.min(axis=0))
 

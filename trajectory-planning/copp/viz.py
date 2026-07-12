@@ -2,7 +2,11 @@
 
   plot_splp_result        —— 2×3 概览（收敛/速度剖面/加速度/约束利用率/时间律/关节速度）
   plot_kinematic_limits   —— 关节 q̇/q̈/q⃛/力矩（带约束）+ TCP 位置速度模、姿态角速度模
-  plot_fig4_interpolation —— 复现论文 Fig.4：可行轨迹的区间解析插值（Prop.1 + Prop.2）
+  plot_speed_torque       —— 速度相关力矩（t–n）分析：转矩–转速包络/利用率/摩擦分量
+  plot_tn_convexification —— 论文 Fig.3：(q̇²,τ) 真实非凸域 vs 仿射切角内逼近
+  plot_interp_profiles    —— 论文 Fig.4 风格：由本用例 profile 全程解析重构 a/b/c/参数jerk
+
+上列全部以 (data, profile) 等**唯一求解结果**为输入，不另造示意数据。
 
 以纯函数暴露，核心求解不依赖本模块。
 """
@@ -289,84 +293,47 @@ def plot_kinematic_limits(
     return fig
 
 
-def fig4_interpolation_example(
-    n_stat: int = 2,
-    c_tail: tuple[float, ...] = (0.20, 0.05, -0.18),
-    a_head: float = 0.6,
-    du: float = 1.0,
-    n_sub: int = 80,
-):
-    """构造论文 Fig.4 的示意轨迹（静止起点 a_s=b_s=0、非静止终点），返回逐区间连续量。
+def speed_torque_signals(data: Topp3Data, profile: Profile) -> dict:
+    """在网格点重构 t–n 约束相关量（供 plot_speed_torque / 断言核对）。
 
-    头部 n_stat 个区间：**恒定参数 jerk** ⃛u≡κ（Prop.2，jerk 零阶保持），
-        a(u)=A_h·(u-u_s)^{4/3}, b(u)=B_h·(u-u_s)^{1/3}, A_h=(3/2)B_h；
-    其余区间：**c 零阶保持**（Prop.1），a(u)=a_{k-1}+2b_{k-1}σ+c_kσ²，b=b_{k-1}+c_kσ；
-        参数 jerk ⃛u=c_k·√a 在区间内随 a 变、可在网格点间断。
-
-    返回 dict：u_fine/a_fine/b_fine/j_fine（连续曲线，j=⃛u）、u_grid/a_grid/b_grid（网格点）、
-    u_stat（静止段右端 = n_stat·du）、kappa。
+    返回逐轴 (n, N)：qd（q̇）、tau_dyn、tau_motor、tau_avail、util（|τ_motor|/τ_avail）、
+    以及摩擦分量 visc（Fv·q̇）、coul（Fc·sgn(q̇)）；标量 t（网格到达时间）。
     """
-    Ls = n_stat * du
-    A_h = a_head / Ls ** (4.0 / 3.0)
-    B_h = (2.0 / 3.0) * A_h
-    kappa = (B_h / 6.0 ** (1.0 / 3.0)) ** 1.5  # 头部恒定参数 jerk ⃛u_s
+    from .solve.interp import s_to_t
+    from .constraints import speed_torque_envelope
 
-    u_grid = [0.0]
-    a_grid = [0.0]
-    b_grid = [0.0]
-    u_parts, a_parts, b_parts, j_parts = [], [], [], []
-
-    # 头部静止段（jerk-ZOH），整段一条 (u-u_s)^{4/3} 曲线
-    u_h = np.linspace(0.0, Ls, n_stat * n_sub + 1)
-    u_parts.append(u_h)
-    a_parts.append(A_h * u_h ** (4.0 / 3.0))
-    b_parts.append(B_h * u_h ** (1.0 / 3.0))
-    j_parts.append(np.full_like(u_h, kappa))
-    for k in range(1, n_stat + 1):
-        u_grid.append(k * du)
-        a_grid.append(A_h * (k * du) ** (4.0 / 3.0))
-        b_grid.append(B_h * (k * du) ** (1.0 / 3.0))
-
-    # 尾部非静止段（c-ZOH），逐区间前向积分
-    a_prev, b_prev = a_grid[-1], b_grid[-1]
-    for j, c in enumerate(c_tail):
-        u_lo = (n_stat + j) * du
-        sig = np.linspace(0.0, du, n_sub + 1)
-        a_seg = a_prev + 2.0 * b_prev * sig + c * sig ** 2
-        b_seg = b_prev + c * sig
-        u_parts.append(u_lo + sig)
-        a_parts.append(a_seg)
-        b_parts.append(b_seg)
-        j_parts.append(c * np.sqrt(np.maximum(a_seg, 0.0)))
-        a_prev = a_prev + 2.0 * b_prev * du + c * du ** 2
-        b_prev = b_prev + c * du
-        u_grid.append(u_lo + du)
-        a_grid.append(a_prev)
-        b_grid.append(b_prev)
-
-    return {
-        "u_fine": np.concatenate(u_parts),
-        "a_fine": np.concatenate(a_parts),
-        "b_fine": np.concatenate(b_parts),
-        "j_fine": np.concatenate(j_parts),
-        "u_grid": np.asarray(u_grid),
-        "a_grid": np.asarray(a_grid),
-        "b_grid": np.asarray(b_grid),
-        "u_stat": Ls,
-        "kappa": kappa,
-    }
+    st = data.speed_torque
+    a, b = profile.a, profile.b
+    sa = np.sqrt(np.maximum(a, 0.0))
+    qd = data.dq * sa[None, :]                                   # (n,N) q̇=q'·√a
+    tau_dyn = st.n_tor * a[None, :] + st.m_tor * b[None, :] + st.g_tor
+    visc = st.viscous[:, None] * qd
+    coul = st.coulomb[:, None] * np.sign(data.dq)
+    tau_motor = tau_dyn + visc + coul
+    tau_avail = np.stack([speed_torque_envelope(st, i, np.abs(qd[i]))   # 梯形包络 τ_env(|q̇|)
+                          for i in range(st.n_tor.shape[0])])
+    with np.errstate(divide="ignore", invalid="ignore"):
+        util = np.abs(tau_motor) / np.maximum(tau_avail, 1e-9)
+    _, t_grid = s_to_t(data.s_grid, profile)
+    return {"t": t_grid, "qd": qd, "tau_dyn": tau_dyn, "tau_motor": tau_motor,
+            "tau_avail": tau_avail, "util": util, "visc": visc, "coul": coul}
 
 
-def plot_fig4_interpolation(
-    ex: dict | None = None,
+def plot_speed_torque(
+    data: Topp3Data,
+    profile: Profile,
+    joints: tuple[int, ...] = (0, 1, 2),
     save_path: str | None = None,
     show: bool = False,
-    title: str = "论文 Fig.4 复现：可行轨迹的区间解析插值（静止起点 + 非静止终点）",
+    title: str = "速度相关力矩（t–n）约束分析：转矩–转速包络、约束利用率与摩擦分量",
 ):
-    """复现论文 Fig.4：由离散网格点 (a_k,b_k,c_k) 解析重构区间内连续 a(u)、b(u) 与参数 jerk。
+    """t–n 约束分析图（论文 Fig.6 风格 + 利用率/摩擦分解）。需 data.speed_torque。
 
-    ex 为 fig4_interpolation_example(...) 的输出；None 时用论文默认设定（N_s=2）。
-    返回 matplotlib Figure。
+    2×3 面板：
+      ①②③ 选定关节的 τ_motor–q̇ 散点 + 可用力矩包络 ±(τ0−κ|q̇|)（点色=利用率）；
+      ④ 各关节约束利用率 |τ_motor|/τ_avail 随时间（=1 即绑定）；
+      ⑤ 最紧关节的 |τ_motor| 与可用力矩 τ_avail 随时间（可用力矩随速度收窄）；
+      ⑥ 最紧关节的力矩构成：动力学 τ_dyn + 粘滞 Fv·q̇ + 库仑 Fc·sgn → τ_motor。
     """
     import matplotlib
 
@@ -375,47 +342,257 @@ def plot_fig4_interpolation(
     _set_cjk_font()
     import matplotlib.pyplot as plt
 
-    if ex is None:
-        ex = fig4_interpolation_example()
+    st = data.speed_torque
+    sig = speed_torque_signals(data, profile)
+    t = sig["t"]
+    util = sig["util"]
+    jstar = int(np.argmax(util.max(axis=1)))          # 最紧（利用率最高）关节
 
-    u, us = ex["u_fine"], ex["u_stat"]
-    ug = ex["u_grid"]
+    fig, ax = plt.subplots(2, 3, figsize=(15, 8))
+    fig.suptitle(title, fontsize=14)
 
-    fig, ax = plt.subplots(3, 1, figsize=(9, 9), sharex=True)
-    fig.suptitle(title, fontsize=13)
+    # ①②③ τ_motor–q̇ 散点 + 可用力矩包络（Fig.6 风格）
+    for col, i in enumerate(joints[:3]):
+        axis = ax[0, col]
+        qd_i = sig["qd"][i]
+        qmax = max(np.abs(qd_i).max(), 1e-6) * 1.08
+        qg = np.linspace(-qmax, qmax, 200)
+        from .constraints import speed_torque_envelope
+        env = speed_torque_envelope(st, i, np.abs(qg))           # 梯形包络 τ_env(|q̇|)
+        axis.plot(qg, env, "r-", lw=1.3, label=r"$\pm\tau_{env}(|\dot q|)$（梯形）")
+        axis.plot(qg, -env, "r-", lw=1.3)
+        sc = axis.scatter(qd_i, sig["tau_motor"][i], c=util[i], cmap="viridis",
+                          vmin=0.0, vmax=1.0, s=14, zorder=3)
+        axis.set_xlabel(r"$\dot q_i$ (rad/s)"); axis.set_ylabel(r"$\tau$ (N·m)")
+        axis.set_title(f"① 关节 {i}：$\\tau_{{motor}}$ vs $\\dot q$（点色=利用率）"
+                       if col == 0 else f"关节 {i}")
+        axis.grid(True, alpha=0.3)
+        if col == 0:
+            axis.legend(fontsize=8, loc="best")
+    fig.colorbar(sc, ax=ax[0, 2], label="利用率 |τ_motor|/τ_avail")
 
-    panels = [
-        (ax[0], ex["a_fine"], ex["a_grid"], "C0", r"① 路径速度平方 $a=\dot s^2$", r"$a(u)$"),
-        (ax[1], ex["b_fine"], ex["b_grid"], "C1", r"② 路径加速度 $b=\ddot s$", r"$b(u)$"),
-    ]
-    for axis, yf, yg, color, ttl, ylab in panels:
-        axis.axvspan(0.0, us, color="0.85", alpha=0.6)  # 静止段
-        axis.plot(u, yf, color=color, lw=1.8)
-        axis.scatter(ug, yg, color=color, zorder=5, s=28, edgecolor="k", linewidths=0.5)
-        axis.set_ylabel(ylab)
-        axis.set_title(ttl, fontsize=11)
-        axis.grid(alpha=0.25)
+    # ④ 各关节利用率随时间
+    for i in range(data.n_axis):
+        ax[1, 0].plot(t, util[i], color=f"C{i}", lw=1.1, label=f"关节 {i}")
+    ax[1, 0].axhline(1.0, color="0.3", ls="--", lw=1.0, label="绑定线 =1")
+    ax[1, 0].set_xlabel("时间 $t$ (s)"); ax[1, 0].set_ylabel("利用率")
+    ax[1, 0].set_title("④ 各关节 t–n 约束利用率随时间")
+    ax[1, 0].legend(fontsize=8, ncol=2); ax[1, 0].set_ylim(0, 1.15)
 
-    # ③ 参数 jerk ⃛u：头部恒定（jerk-ZOH），尾部 c·√a 随区间变、网格点可间断
-    ax[2].axvspan(0.0, us, color="0.85", alpha=0.6)
-    ax[2].plot(u, ex["j_fine"], color="C3", lw=1.8)
-    for xg in ug:
-        ax[2].axvline(xg, color="0.7", lw=0.6, ls=":")
-    ax[2].axhline(0.0, color="0.6", lw=0.8)
-    ax[2].set_ylabel(r"$\dddot u$")
-    ax[2].set_title(r"③ 参数 jerk $\dddot u=c\sqrt{a}$（头部 $N_s$ 段恒定；尾部逐区间、网格点可间断）", fontsize=11)
-    ax[2].set_xlabel(r"路径参数 $u$（网格点 $u_k$；灰色 = 静止段 $[u_s, u_{N_s}]$）")
-    ax[2].grid(alpha=0.25)
+    # ⑤ 最紧关节：|τ_motor| 与可用力矩 τ_avail
+    ax[1, 1].plot(t, np.abs(sig["tau_motor"][jstar]), color="C3", lw=1.4, label=r"$|\tau_{motor}|$")
+    ax[1, 1].plot(t, sig["tau_avail"][jstar], color="0.3", ls="--", lw=1.4,
+                  label=r"可用力矩 $\tau_{env}(|\dot q|)$（梯形）")
+    ax[1, 1].set_xlabel("时间 $t$ (s)"); ax[1, 1].set_ylabel(r"$\tau$ (N·m)")
+    ax[1, 1].set_title(f"⑤ 最紧关节 {jstar}：需求 vs 可用力矩（可用随速度收窄）")
+    ax[1, 1].legend(fontsize=9); ax[1, 1].grid(True, alpha=0.3)
 
-    # 起末点标注
-    ax[0].annotate(r"$a_s=b_s=0$", xy=(0, 0), xytext=(0.15, 0.12 * ex["a_grid"].max()),
-                   fontsize=10, color="0.25")
-    ax[0].annotate(r"$a_f\neq0$", xy=(ug[-1], ex["a_grid"][-1]),
-                   xytext=(ug[-1] - 1.1, ex["a_grid"][-1]), fontsize=10, color="0.25")
+    # ⑥ 最紧关节的力矩构成（动力学 + 粘滞 + 库仑）
+    ax[1, 2].plot(t, sig["tau_dyn"][jstar], color="C0", lw=1.3, label=r"动力学 $\tau_{dyn}$")
+    ax[1, 2].plot(t, sig["visc"][jstar], color="C1", lw=1.3, label=r"粘滞 $F_v\dot q$")
+    ax[1, 2].plot(t, sig["coul"][jstar], color="C2", lw=1.3, label=r"库仑 $F_c\,\mathrm{sgn}$")
+    ax[1, 2].plot(t, sig["tau_motor"][jstar], color="C3", lw=1.6, label=r"合计 $\tau_{motor}$")
+    ax[1, 2].axhline(0.0, color="0.7", lw=0.6)
+    ax[1, 2].set_xlabel("时间 $t$ (s)"); ax[1, 2].set_ylabel(r"$\tau$ (N·m)")
+    ax[1, 2].set_title(f"⑥ 最紧关节 {jstar} 力矩构成（摩擦并入约束边界）")
+    ax[1, 2].legend(fontsize=8); ax[1, 2].grid(True, alpha=0.3)
 
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.text(
+        0.5, 0.015,
+        r"t–n 约束 $|\tau_{dyn}+F_v\dot q+F_c\,\mathrm{sgn}| \leq \tau_{env}(|\dot q|)$"
+        "（梯形可用力矩：低速平台+高速线性收窄；叠加粘滞+库仑摩擦）；求解按 SPLP 在 a_lin 处"
+        "对 √a 切线线性化（保守内逼近、收敛处精确）。参数为合成 stand-in，见 docs/tn_constraint_notes.md。",
+        ha="center", fontsize=9, color="0.35",
+    )
+    fig.tight_layout(rect=(0, 0.04, 1, 0.96))
     if save_path:
         fig.savefig(save_path, dpi=120)
     if show:
         plt.show()
     return fig
+
+
+def plot_tn_convexification(
+    data: Topp3Data,
+    profile: Profile,
+    save_path: str | None = None,
+    show: bool = False,
+    title: str = "t–n 约束凸化（论文 Fig.3）：$\\dot q^2$ 平面的真实非凸可行域 vs 仿射切角内逼近",
+):
+    """逐关节复现论文 **Fig.3**：在 $(\\dot q^2,\\tau)$ 平面直观显示"切割意图与效果"。
+
+    **切割意图**：梯形可用力矩 τ_env(|q̇|) 的 rolloff 斜段在 $\\dot q^2=q'^2 a$ 坐标下是
+    **凸曲线**（因 τ_env 仿射于 |q̇|=√(q̇²)），其**下方**可行域**非凸**（论文 Fig.3 虚线）。
+    求解按论文思路（在 a_lin 处对 √a 切线线性化）用**仿射直线**内逼近，切掉曲线与切线间的角。
+
+    **切割效果**：蓝色凸内逼近 ⊆ 灰色真实域（保守/安全，绝不超真实边界）；工作点（点色=
+    利用率）落在凸内逼近内。本图 rolloff 段以**平台角点单切线**示意最保守的一次切割；实际
+    求解逐点在各自 a_lin 处相切、凸域更贴近曲线（收敛处精确）。参数为合成 stand-in。
+    """
+    import matplotlib
+
+    if not show:
+        matplotlib.use("Agg")
+    _set_cjk_font()
+    import matplotlib.pyplot as plt
+    from .constraints import speed_torque_envelope
+
+    st = data.speed_torque
+    sig = speed_torque_signals(data, profile)
+    n = st.n_tor.shape[0]
+    ncols = 3
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(15, 4.2 * nrows), squeeze=False)
+    fig.suptitle(title, fontsize=14)
+
+    sc = None
+    for i in range(n):
+        ax = axes[i // ncols, i % ncols]
+        wc, w0, tau0 = float(st.rated_speed[i]), float(st.noload_speed[i]), float(st.tau0[i])
+        s_roll = tau0 / (w0 - wc)
+        xc = wc ** 2                                       # q̇² 拐点（平台末端）
+
+        xg = np.linspace(0.0, w0 ** 2, 400)                # q̇² 全程 [0, ω0²]
+        env = speed_torque_envelope(st, i, np.sqrt(xg))    # τ_env(√x)：梯形→q̇²（rolloff 弯曲）
+
+        # ① 真实可行域 |τ|≤τ_env：灰填 + 虚线边界（rolloff 段为凸曲线→下方非凸）
+        ax.fill_between(xg, -env, env, color="0.86", zorder=0)
+        ax.plot(xg, env, color="0.35", ls="--", lw=1.4, label=r"真实边界 $\pm\tau_{env}$（非凸）")
+        ax.plot(xg, -env, color="0.35", ls="--", lw=1.4)
+
+        # ② 仿射切角内逼近：平台角 (ω_c², τ0) 处对 rolloff 凸曲线引切线（切线在曲线下=保守）
+        slope = -s_roll / (2.0 * wc)                       # dτ_env/dx |_{x=ω_c²}
+        tan = tau0 + slope * (xg - xc)
+        approx = np.clip(np.minimum(tau0, tan), 0.0, None)  # 凸上界=min(平台 τ0, 切线)，≥0 不反转
+        ax.plot(xg, approx, color="C0", lw=1.7, label=r"凸内逼近（切线，保守）")
+        ax.plot(xg, -approx, color="C0", lw=1.7)
+        ax.fill_between(xg, -approx, approx, facecolor="C0", alpha=0.10, zorder=1)
+
+        # ③ 被切掉的非凸角：真实域与凸逼近之差（rolloff 段），红斜纹
+        cut = env - approx > 1e-9
+        ax.fill_between(xg, approx, env, where=cut, facecolor="none",
+                        edgecolor="C3", hatch="xxx", lw=0.0, zorder=2,
+                        label="切掉的非凸角")
+        ax.fill_between(xg, -env, -approx, where=cut, facecolor="none",
+                        edgecolor="C3", hatch="xxx", lw=0.0, zorder=2)
+
+        # ④ 平台|rolloff 分界 + 实际工作点 (q̇², τ_motor)，点色=利用率
+        ax.axvline(xc, color="0.55", ls=":", lw=1.0)
+        ax.text(xc, tau0 * 1.04, r"$\omega_c^2$", fontsize=8, color="0.4", ha="center")
+        x_op = sig["qd"][i] ** 2
+        sc = ax.scatter(x_op, sig["tau_motor"][i], c=sig["util"][i], cmap="viridis",
+                        vmin=0.0, vmax=1.0, s=18, zorder=3, edgecolor="k", linewidth=0.25,
+                        label="工作点（点色=利用率）")
+
+        ax.set_xlabel(r"$\dot q_i^2$ (rad²/s²)")
+        ax.set_ylabel(r"$\tau_i$ (N·m)")
+        ax.set_title(f"关节 {i}：$\\tau_0$={tau0:.0f}, $\\omega_c$={wc:.2f}, $\\omega_0$={w0:.2f}")
+        ax.set_ylim(-tau0 * 1.18, tau0 * 1.18)
+        ax.grid(True, alpha=0.25)
+        if i == 0:
+            ax.legend(fontsize=7, loc="lower left")
+
+    for j in range(n, nrows * ncols):        # 关掉多余子图
+        axes[j // ncols, j % ncols].axis("off")
+    fig.text(0.5, 0.008,
+             r"论文 Fig.3：梯形可行域映射到 $\dot q^2=q'^2 a$ 后 rolloff 边界弯曲→下方非凸；"
+             r"用仿射切线内逼近切掉非凸角（此处示意单条角点切线，最保守），保证凸且保守。"
+             r"实际求解 SPLP 逐点在各自 a_lin 处相切、收敛处贴合真实曲线；工作点全落在真实域内。",
+             ha="center", fontsize=9, color="0.35")
+    fig.tight_layout(rect=(0, 0.03, 0.9, 0.96))
+    if sc is not None:                        # 独立色条轴，避免挤占子图
+        cax = fig.add_axes((0.915, 0.12, 0.014, 0.76))
+        fig.colorbar(sc, cax=cax, label="利用率 |τ_motor|/τ_env")
+    if save_path:
+        fig.savefig(save_path, dpi=120)
+    if show:
+        plt.show()
+    return fig
+
+
+def plot_interp_profiles(
+    data: Topp3Data,
+    profile: Profile,
+    save_path: str | None = None,
+    show: bool = False,
+    title: str = "区间解析插值（论文 Fig.4 风格）：本用例轨迹全程 a/b/c/参数jerk 重构",
+):
+    """用**本测试用例**求得的 (data, profile) 解析重构全程 a(s)/b(s)/c(s)/⃛u(s)（论文 Fig.4 复现）。
+
+    数据源自唯一用例（solve/interp.fine_profiles 逐区间闭式插值，**覆盖全部插补周期**）：静止头/尾
+    按 Box I / Prop.2 jerk-ZOH、其余按 Prop.1 c-ZOH。控制量 c=⃛u/√a 在非静止段=c_k（逐区间常值、
+    网格点可间断），静止端 a→0 时 c→∞（正是静止段用 jerk-ZOH 而非 c-ZOH 的原因）。返回 Figure。
+    """
+    import matplotlib
+
+    if not show:
+        matplotlib.use("Agg")
+    _set_cjk_font()
+    import matplotlib.pyplot as plt
+    from .solve.interp import fine_profiles
+
+    sg = data.s_grid
+    N = sg.size
+    fp = fine_profiles(sg, profile)
+    s, a_f, b_f, j_f = fp["s"], fp["a"], fp["b"], fp["ubar"]          # ⃛u = ubar
+    with np.errstate(divide="ignore", invalid="ignore"):
+        c_f = np.where(a_f > 1e-9, j_f / np.sqrt(np.maximum(a_f, 1e-12)), np.nan)  # c=⃛u/√a
+    ns, nf = getattr(profile, "num_stationary", (0, 0))
+    stat_spans = []
+    if ns > 0:
+        stat_spans.append((sg[0], sg[ns]))
+    if nf > 0:
+        stat_spans.append((sg[N - 1 - nf], sg[N - 1]))
+
+    fig, ax = plt.subplots(4, 1, figsize=(12, 12), sharex=True)
+    fig.suptitle(title, fontsize=13)
+
+    def _shade(axis):
+        for lo, hi in stat_spans:
+            axis.axvspan(lo, hi, color="0.85", alpha=0.6)            # 静止段
+
+    # ①② 状态 a、b：连续曲线 + 网格点
+    for axis, yf, yg, color, ttl, ylab in (
+        (ax[0], a_f, profile.a, "C0", r"① 路径速度平方 $a=\dot s^2$", r"$a(s)$"),
+        (ax[1], b_f, profile.b, "C1", r"② 路径加速度 $b=\ddot s$", r"$b(s)$"),
+    ):
+        _shade(axis)
+        axis.plot(s, yf, color=color, lw=1.5)
+        axis.scatter(sg, yg, color=color, zorder=5, s=14, edgecolor="k", linewidths=0.35)
+        axis.set_ylabel(ylab)
+        axis.set_title(ttl, fontsize=11)
+        axis.grid(alpha=0.25)
+
+    # ③ 控制量 c=b'=⃛u/√a：非静止段逐区间常值（c-ZOH，网格点可间断）；静止端 →∞
+    _shade(ax[2])
+    ax[2].plot(s, c_f, color="C2", lw=1.3)
+    ax[2].axhline(0.0, color="0.6", lw=0.8)
+    nonstat = np.ones_like(s, dtype=bool)                            # ylim 只按**非静止段**的 c（=c_k，有界）
+    for lo, hi in stat_spans:                                       # 静止端 c→∞ 任其冲出上/下沿
+        nonstat &= ~((s >= lo) & (s <= hi))
+    cc = c_f[nonstat & np.isfinite(c_f)]
+    if cc.size:
+        lo, hi = float(cc.min()), float(cc.max())
+        pad = 0.1 * (hi - lo) + 1e-6
+        ax[2].set_ylim(lo - pad, hi + pad)
+    ax[2].set_ylabel(r"$c=b'$")
+    ax[2].set_title(r"③ 控制量 $c=b'=\dddot u/\sqrt{a}$（非静止段 c-ZOH 逐区间常值；静止端 →∞ 故用 jerk-ZOH）", fontsize=11)
+    ax[2].grid(alpha=0.25)
+
+    # ④ 参数 jerk ⃛u：静止段恒定=κ；非静止段 c·√a 随区间变、可间断
+    _shade(ax[3])
+    ax[3].plot(s, j_f, color="C3", lw=1.3)
+    ax[3].axhline(0.0, color="0.6", lw=0.8)
+    ax[3].set_ylabel(r"$\dddot u$")
+    ax[3].set_title(r"④ 参数 jerk $\dddot u=c\sqrt{a}$（静止段恒定=κ；非静止段逐区间、可间断）", fontsize=11)
+    ax[3].set_xlabel(r"路径参数 $s$（网格点 $s_k$；灰色 = 静止段，两端 rest-to-rest）")
+    ax[3].grid(alpha=0.25)
+
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    if save_path:
+        fig.savefig(save_path, dpi=120)
+    if show:
+        plt.show()
+    return fig
+
+

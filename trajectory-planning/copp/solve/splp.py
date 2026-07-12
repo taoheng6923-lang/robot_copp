@@ -29,6 +29,7 @@ class SolveOptions:
     mode: str = "plp_lp"     # 默认 PLP+LP（算力最省）；"socp" 为备选（M1 未实现）
     n_stationary: int = 1    # 零进给端的静止段宽度 N_s（Box I / Prop.2）；仅对 a_bnd≈0 端生效
     flags: ConstraintFlags = field(default_factory=ConstraintFlags)  # 各约束启用开关（默认全开）
+    smooth_c_weight: float = 0.0  # 非静止段 c 平滑惩罚权重 λ：目标 += λ·Σ|c_i−c_{i+1}|；0 关闭
     solver: str | None = None
     verbose: bool = False
 
@@ -68,7 +69,8 @@ def solve_splp(
 
     for p in range(1, opts.n_iter + 1):
         profile = build_and_solve(
-            data, a_lin, plp, solver=opts.solver, num_stat=num_stat, flags=opts.flags
+            data, a_lin, plp, solver=opts.solver, num_stat=num_stat, flags=opts.flags,
+            smooth_c_weight=opts.smooth_c_weight,
         )
         tf, _ = s_to_t(data.s_grid, profile)
         hist.t_final.append(tf)

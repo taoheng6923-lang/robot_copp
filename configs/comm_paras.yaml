@@ -7,19 +7,19 @@
 # 缺省项按 true。经 load_constraint_flags() 读入 SolveOptions.flags。
 constraints:
   velocity: true              # 轴向速度 |q̇|≤vmax
-  acceleration: true          # 轴向加速度 |q̈|≤amax
+  acceleration: false          # 轴向加速度 |q̈|≤amax
   jerk: true                  # 轴向 jerk |q⃛|≤jmax（3 阶）
-  torque: false                # 关节力矩 τ_min≤τ≤τ_max
+  torque: false                # 关节力矩 τ_min≤τ≤τ_max（恒定盒式）
+  speed_torque: true           # 速度相关力矩（t–n）；物理参数 κ/Fv/Fc 在 robot_ur5.yaml 逐关节
   tcp_velocity: true          # TCP 位置速度模 ‖ṗ‖≤v_tcp_max
   tcp_angular_velocity: false  # TCP 姿态角速度模 ‖ω‖≤w_tcp_max
 
-# 论文 Fig.4 复现示意（区间解析插值 Prop.1 + Prop.2）参数。
-fig4_example:
-  # 头部“恒定参数 jerk ⃛u”的区间宽度 N_s（jerk 零阶保持 / 静止段）。
-  #   N_s=2 → 静止段跨 2 个区间、含 3 个网格点 u0,u1,u2（⃛u≡κ 恒定）。
-  n_stat: 1
-  du: 1.0          # 网格区间宽度 Δ（均匀）
-  a_head: 0.6      # 静止段末端目标 a(u_{N_s})：a∝(u-u_s)^{4/3} 由此定标
-  n_sub: 80        # 每区间细采样点数（画连续曲线用）
-  # 尾部各非静止区间的 c 零阶保持控制值（长度 = 非静止区间数）。
-  c_tail: [0.20, 0.05, -0.18]
+# 目标函数附加项。
+objective:
+  # 非静止（c-ZOH）段相邻 c 控制跳变的平滑惩罚权重 λ：目标 += λ·Σ|c_i−c_{i+1}|。
+  #   经 LP 不等式 p_i≥|c_i−c_{i+1}| 实现；仅作用于非零速段（静止段用 jerk-ZOH，c 发散不参与）。
+  #   λ 应为**小系数**，使平滑项不主导时间最优目标；0 关闭。经 load_smooth_c_weight() 读入。
+  smooth_c_weight: 0.005
+
+# 注：论文 Fig.4（区间解析插值）现由**唯一测试用例**的求解结果直接重构出图
+# （viz.plot_interp_profiles(data, profile)），不再单独造示意数据/参数节。

@@ -7,7 +7,8 @@
   - 轴向加速度：±(q''·a + q'·b) ≤ amax（逐轴逐点）
   - 轴向 jerk（在 a_lin 处线性化）：linearize.jerk_constraints
   - PLP 割线 + 下界 a≥δ0：plp_objective.build_plp
-目标：min Σ w_k J_k（PLP 分段线性时间代价）。
+  - c 控制平滑惩罚（可选，仅非静止 c-ZOH 段）：p_i ≥ |c_i−c_{i+1}|（LP 不等式）
+目标：min Σ w_k J_k（PLP 分段线性时间代价）+ λ·Σ p_i（c 平滑，λ 小、非主导项）。
 """
 
 from __future__ import annotations
@@ -25,10 +26,13 @@ from .plp_objective import PlpObjective, build_plp
 def build_and_solve(
     data: Topp3Data, a_lin: np.ndarray, plp: PlpObjective,
     solver: str | None = None, num_stat: tuple[int, int] = (0, 0), flags=None,
+    smooth_c_weight: float = 0.0,
 ) -> Profile:
     """组装一次 PLP-LP（论文式 29）并求解，返回 Profile(a,b,c)。
 
     num_stat 为 Box I 静止段；flags（ConstraintFlags）控制各约束启用。
+    smooth_c_weight（λ≥0）：非静止段相邻 c 控制跳变惩罚权重，目标 += λ·Σ|c_i−c_{i+1}|；
+    0 关闭。仅作用于 c-ZOH（非零速）段，抑制中段 c 无谓来回跳动而不显著牺牲时间最优性。
     """
     from ..options import ConstraintFlags
 
@@ -65,9 +69,27 @@ def build_and_solve(
         from ..constraints import torque_constraints
 
         cons += torque_constraints(data.torque, a, b)
+    # 速度相关力矩（t–n 梯形包络 + 粘滞/库仑摩擦；√a 在 a_lin 处 SCP 线性化，见 ingest）
+    if flags.speed_torque and data.speed_torque is not None:
+        from ..constraints import speed_torque_constraints
+
+        cons += speed_torque_constraints(data.speed_torque, data.dq, a, b, a_lin, num_stat=num_stat)
     # PLP 目标 + 下界
     plp_cons, objective = build_plp(plp, a, jvar)
     cons += plp_cons
+
+    # c 控制平滑惩罚（仅非静止 c-ZOH 段；c_k=(b_k−b_{k-1})/Δ_k 仿射于 b）：对相邻**非静止**区间
+    # (i, i+1) 引入 p_i≥|c_i−c_{i+1}|（两条 LP 不等式），目标 += λ·Σp_i。λ 小、非主导项，
+    # 抑制中段 c 无谓来回跳动。静止（零速）段用 jerk-ZOH、c 发散，故不参与。
+    if smooth_c_weight > 0.0 and m.size >= 2:
+        pairs = m[:-1][np.diff(m) == 1]                     # 相邻均为非静止的区间对起点 i
+        if pairs.size:
+            c_i = cp.multiply(1.0 / ds[pairs], b[pairs + 1] - b[pairs])            # c 于区间 i
+            c_next = cp.multiply(1.0 / ds[pairs + 1], b[pairs + 2] - b[pairs + 1])  # c 于区间 i+1
+            dc = c_i - c_next
+            pvar = cp.Variable(pairs.size, name="p_smooth", nonneg=True)
+            cons += [pvar >= dc, pvar >= -dc]              # p_i ≥ |c_i − c_{i+1}|
+            objective = objective + smooth_c_weight * cp.sum(pvar)
 
     prob = cp.Problem(cp.Minimize(objective), cons)
     status = solve_problem(prob, solver=solver)

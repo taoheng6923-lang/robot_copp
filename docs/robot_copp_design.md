@@ -297,6 +297,45 @@ $\mathrm{rcond}(\mathbf J_m)<10^{-6}$ 时切阻尼最小二乘逆（DLS，$\lamb
 
 本层的**算法方案完全采用论文的 TOTP-SPLP**（分段线性目标 + 序列线性化 + 无损离散化 + 解析插值），理论细节见 [`paper_notes.md`](../0.other_lib_code/copp/copp/docs/paper_notes.md) §4–§7。copp Rust 库作为**可选后端**：其无损离散化、jerk 线性化、解析插值可直接复用；但**目标函数与迭代需按 §7.2.1 补齐到论文方案**——现成的 `topp3_lp` 只是论文的 TOTP-LP 基线（$\max\int a$、单次求解），并非本方案。
 
+### 7.0 本仓库实际求解的完整离散 LP（权威形式）
+
+以下是本仓库 Python 内核（`trajectory-planning/copp/solve/`）**每次 SPLP 迭代 $p$ 实际组装并求解的完整线性规划**，逐条对应代码。理论出处见 §7.1–§7.2 与 [`paper_notes.md`](../0.other_lib_code/copp/copp/docs/paper_notes.md)；标注 $\mathbf 1[\cdot]$ 的约束由 `configs/comm_paras.yaml` 的 `constraints.*` 开关（`ConstraintFlags`）控制启停。
+
+**记号**：网格 $\{s_k\}_{k=0}^{N-1}$，区间宽 $\Delta_k=s_k-s_{k-1}$；状态 $a_k=\dot s^2(s_k),\ b_k=\ddot s(s_k)$；区间控制（Prop.1 的 $c$ 零阶保持）$c_k=\dfrac{b_k-b_{k-1}}{\Delta_k}$（**仿射于 $b$**，非独立变量）。$\mathcal D\subseteq\{1,\dots,N\!-\!1\}$ 为**非静止**区间集（其余为头/尾 Box I 静止段）。第 $p$ 次迭代在参考剖面 $\hat a:=a^{(p-1)}$ 处线性化 $\sqrt a$、$a^{-1/2}$。逐轴几何量 $q_i',q_i'',q_i'''$（$i=1..n$）由 §5 降维预计算。
+
+**决策变量**：$a,b,J\in\mathbb R^{N}$（$J_k$=PLP 辅助 $\approx1/\sqrt{a_k}$），$p\in\mathbb R^{M}_{\ge0}$（$c$ 平滑辅助，$M$=相邻非静止区间对数）。
+
+**目标函数**（`plp_objective.build_plp` + `lp_problem` 平滑项）：
+
+$$\boxed{\ \min_{a,b,J,p}\ \ \underbrace{\sum_{k=0}^{N-1} w_k\,J_k}_{\text{时间（PLP，}\approx\int ds/\sqrt a\text{）}}\ +\ \underbrace{\lambda\sum_{(k,k+1)\subseteq\mathcal D} p_k}_{\text{c 平滑（本仓库扩展）}}\ }\qquad w_k=\tfrac12(s_{k+1}-s_{k-1})\ (\text{内点}),\quad w_0=w_{N-1}=0.$$
+
+**约束**（`solve/lp_problem.py` 组装）：
+
+$$
+\begin{aligned}
+& \textbf{(边界)}\quad a_0=\dot s_0^2,\ \ a_{N-1}=\dot s_T^2,\ \ b_0=b_0^\ast,\ \ b_{N-1}=b_{N-1}^\ast && \text{§7.5}\\[3pt]
+& \textbf{(动力学, 非静止)}\quad a_k-a_{k-1}=(b_{k-1}+b_k)\,\Delta_k,\ \ k\in\mathcal D && \text{Prop.1}\\[3pt]
+& \textbf{(静止段 Box I)}\quad b_k=\tfrac{\pm2}{3\delta_k}a_k,\ \ a_k=\big(\tfrac{\delta_k}{\delta_{\rm e}}\big)^{4/3}a_{\rm e},\ \ \delta_k=|s_k-s_{\rm rest}| && \text{Prop.2 (头}+/\text{尾}-)\\[3pt]
+& \textbf{(速度上界)}\quad a_k\le\bar a_k=\min\!\Big(\min_i\tfrac{V_i^2}{q_i'^2},\ \tfrac{v_{\rm tcp}^2}{\|\mathbf p'\|^2},\ \tfrac{w_{\rm tcp}^2}{\|\mathbf J_\omega q'\|^2}\Big),\ \ V_i=\omega_{0,i}\,|\,v_{\max,i} && \mathbf 1[\text{velocity},\text{tcp}]\\[3pt]
+& \textbf{(轴向加速度)}\quad -a_{\max,i}\le q_i''a_k+q_i'b_k\le a_{\max,i},\ \ \forall i && \mathbf 1[\text{acceleration}]\\[3pt]
+& \textbf{(轴向 jerk, 线性化)}\quad \big(\pm q_i'''+\tfrac{j_{\max,i}}{2\hat a_k^{3/2}}\big)a_k\pm 3q_i''b_k\pm q_i'\,c(s_k^\pm)\le\tfrac{3j_{\max,i}}{2\sqrt{\hat a_k}} && \mathbf 1[\text{jerk}]\ \text{eq.32}\\[3pt]
+& \textbf{(关节力矩 盒式)}\quad \tau_{\min,i}\le n_i a_k+m_i b_k+g_i\le\tau_{\max,i},\ \ \forall i && \mathbf 1[\text{torque}]\\[3pt]
+& \textbf{(t–n 力矩)}\quad \tau_i^{\rm dyn}+(s_j|q_i'|+F_{v,i}q_i')\,\widetilde{\sqrt a}_k\le E_j-F_{c,i}\,\mathrm{sgn}\,q_i' && \mathbf 1[\text{speed\_torque}]\\
+& \qquad\quad\ -\tau_i^{\rm dyn}+(s_j|q_i'|-F_{v,i}q_i')\,\widetilde{\sqrt a}_k\le E_j+F_{c,i}\,\mathrm{sgn}\,q_i' && (s_j,E_j)\in\{(0,\tau_0),(s_{\rm roll},E_{\rm roll})\}\\[3pt]
+& \textbf{(PLP 割线)}\quad J_k\ge\dfrac{\delta_{\ell-1}+\sqrt{\delta_{\ell-1}\delta_\ell}+\delta_\ell-a_k}{(\sqrt{\delta_{\ell-1}}+\sqrt{\delta_\ell})\sqrt{\delta_{\ell-1}\delta_\ell}},\ \ \forall\ell && \text{eq.29d}\\[3pt]
+& \textbf{(PLP 下界)}\quad a_k\ge\delta_{k,0}>0\ \ (\text{内点}) && \text{Prop.3}\\[3pt]
+& \textbf{(c 平滑)}\quad p_k\ge c_k-c_{k+1},\ \ p_k\ge c_{k+1}-c_k,\ \ (k,k{+}1)\subseteq\mathcal D && \mathbf 1[\lambda>0]\ \text{§7.2⑤}
+\end{aligned}
+$$
+
+其中：$\tau_i^{\rm dyn}=n_i a_k+m_i b_k+g_i$（无摩擦动力学力矩，$n_i=M q_i''\!+\!Cq_i',\ m_i=Mq_i',\ g_i=$ 重力）。
+
+**t–n 力矩 = 论文（Ardeshiri 2010）凸化方法**（详见 [`docs/tn_constraint_notes.md`](tn_constraint_notes.md) §5、§8、§11）：其核心是把速度相关的可用力矩约束**改写到 $(\tau_i,\dot q_i^{\,2})$ 平面**——因 $\dot q_i^{\,2}=q_i'^2\,a$ **线性于优化变量 $a$**，故约束 $T\tau_i+\bar U\,\dot q_i^2\le P$ 直接**仿射于 $a$**（论文式 17→18），速度相关性全被吸收进随路径预计算的系数 $\bar U q_i'^2$。本仓库把电机数据表的**梯形**包络 $\tau_\text{env}(|\dot q|)=\min(\tau_0,\,E_{\rm roll}-s_{\rm roll}|\dot q|)$ 写成**平台/rolloff 两个 halfplane 之交**（$(s_j,E_j)\in\{(0,\tau_0),(s_{\rm roll},E_{\rm roll})\}$，$s_{\rm roll}=\tau_0/(\omega_0-\omega_c),\ E_{\rm roll}=\tau_0+s_{\rm roll}\omega_c$）× 驱动/制动两侧；摩擦按论文思路并入——粘滞 $F_v$ 进 $\dot q$ 系数、库仑 $F_c$ 进截距。式中 $|\dot q_i|=|q_i'|\sqrt{a_k}$ 的 $\sqrt{a_k}$：论文原版用 SOCP 可精确表示（对应本仓库预留 `mode='socp'`），当前 **LP** 路线则在 $\hat a_k$ 处以**保守仿射替换** $\widetilde{\sqrt a}_k$ 落地为仿射-于-$a$ 行——系数 $\ge0$ 取切线上界 $\tfrac{a_k}{2\sqrt{\hat a_k}}+\tfrac{\sqrt{\hat a_k}}2$、$<0$ 取过原点割线下界 $\tfrac{|q_i'|}{\omega_0}a_k$（均收紧不违约、收敛处相切即精确），即论文 Fig.3"切掉非凸角"的保守内逼近。
+
+其余：$c(s_k^\pm)$ 为控制在网格点的左/右极限（非静止取相邻区间 $c_k,c_{k+1}$；静止点取 Box I 点值 $\tfrac{2a_k}{9\delta_k^2}$，rest 端跳过）；PLP 采样 $\delta_{k,\ell}=10^{\ell-4}\hat a_k$。
+
+> **决策变量说明**：$c$ **不是**独立变量——它经 Prop.1 表为 $b$ 的差分 $c_k=(b_k-b_{k-1})/\Delta_k$，故所有含 $c$ 的行（jerk、平滑）都仿射于 $(a,b)$，问题保持纯 LP。求解后由该式派生 $c$ 供解析插值（§7.4）。**求解器选择**由目标决定：本仓库默认走 PLP+LP（`cvxpy`+`clarabel`）；备选 SOCP（精确目标）见 §7.2.1，尚未实现。$\lambda,\ \mathbf 1[\cdot]$ 等配置见 `configs/comm_paras.yaml`，机器人本体量（$v_{\max},a_{\max},j_{\max},\tau,\omega_0,F_v,F_c,\dots$）见 `configs/robot_ur5.yaml`。
+
 ### 7.1 状态变换与无损离散化
 
 构造状态 $a(s)=\dot s^2,\ b(s)=\ddot s,\ c(s)=\dddot s\,\dot s$，动力学线性化 $a'=2b,\ b'=c$，目标 $J=\int_0^{s_f}\!ds/\sqrt{a}$。区间内按 Prop.1（非静止点 $c$ 零阶保持）/ Prop.2（静止点 $\dddot s$ 零阶保持）离散，配合解析插值实现**无损离散化**，区间违约 $O(\Delta^2)$ 有界（Theorem 1）。这些已由 copp 内核实现，本层只需提供 §5/§6 的 `PathDerivatives` 与约束。
@@ -316,6 +355,32 @@ $$\big|t_f^{(p)}-t_f^{(p-1)}\big|<\varepsilon_t \quad\text{或}\quad \big\|a^{(p
 实践中 $N_\text{iter}$ 取小（2~3）即得可行近优解（论文 §4.1）。
 
 **④ 种子与可行性**：种子 $a^{(0)}$ 取 2 阶问题最优解（`topp2_ra`），**不必**是可行轨迹，只需保证 $p=1$ 的线性化子问题可行（论文 §7.3）。由此 **Theorem 2** 保证 SPLP 全程可行并收敛到（PLP 目标 + 线性化约束下的）KKT 解。
+
+**⑤ 控制量 $c$ 平滑惩罚（本仓库扩展，非论文项）**：论文目标只含时间项，其最优解允许**非静止段**的控制 $c=\dddot s\,\dot s$ 在相邻区间**来回跳变**（$\dddot s$ 频繁反号），对时间最优并无必要，却使 $\ddot s/\dddot s$ 抖动、参数 jerk 呈锯齿（见 `fig4_interpolation.png` 面板③）。为抑制之，在**非静止（c 零阶保持）段**对相邻区间控制差引入 $L_1$ 平滑惩罚：为每对相邻非静止区间 $(k,k+1)$ 引入辅助变量 $p_k$ 与两条 **LP 不等式**
+
+$$p_k\ \ge\ c_k-c_{k+1},\qquad p_k\ \ge\ -(c_k-c_{k+1})\qquad\Longleftrightarrow\qquad p_k\ \ge\ |c_k-c_{k+1}|,$$
+
+其中区间控制 $c_k=\dfrac{b_k-b_{k-1}}{\Delta_k}$（Prop.1 的 $c$ 零阶保持离散，**仿射于决策变量 $b$**）。目标相应改为
+
+$$\min\ \underbrace{\sum_k (s_{k+1}-s_{k-1})\,J_k}_{\text{时间（PLP，①）}}\ +\ \lambda\sum_k p_k,$$
+
+权重 $\lambda\ge0$ 配置于 `comm_paras.yaml` 的 `objective.smooth_c_weight`（缺省 $0.005$；$\lambda=0$ 关闭），应取**小系数**使平滑项不主导时间目标。**要点**：
+
+- **仅非静止段参与**——静止（零进给）段用 Prop.2 的 $\dddot s$ 零阶保持，那里 $c=\dddot s/\sqrt a$ 随 $a\to0$ 发散、并非真正的自由控制，故排除（对应实现里跳过 `dyn_mask` 之外的区间）；
+- 惩罚保持**纯 LP 结构**（仅新增 $p_k$ 变量与两倍不等式行、目标加线性项），不改变求解器，不影响可行性/收敛性证明（Theorem 2 仍成立）；
+- 与 jerk 硬约束正交：jerk 上界仍由 ② 强制满足，本项只在可行域内择"更平滑的 $c$"。
+
+**本用例实测（示意，UR5 t–n 例、81 点；具体数值随 `tau_scale` 等配置变化）**——中段抖动量 $\sum_k|c_k-c_{k+1}|$ 与终止时间 $t_f$：
+
+| $\lambda$ | $t_f$ | $\sum_k\lvert c_k-c_{k+1}\rvert$ | 说明 |
+|-----------|-------|------------------------------------|------|
+| $0$（关闭） | 0.450 | 6053 | $c$ 大幅来回跳变（$\pm500$） |
+| $0.001$ | 0.454 | 854 | 轻微平滑，时间近乎不变 |
+| $0.005$（缺省） | ~0.46 | ~400 | 明显平滑、时间代价数个百分点 |
+| $0.01$ | 0.486 | 251 | |
+| $0.05$ | 0.543 | 52 | $c$ 抖动降 ~99%、时间 +20.8%（平滑偏强） |
+
+即 $\lambda$ 越大越平滑、时间代价越高；缺省 $0.005$ 属"轻量平滑"。落地见 `solve/lp_problem.py`（`build_and_solve(..., smooth_c_weight)`）、`solve/splp.py`（`SolveOptions.smooth_c_weight`）、`config.load_smooth_c_weight`。
 
 #### 7.2.1 与 copp Rust 库的落地映射（重要）
 

@@ -56,6 +56,12 @@ def compute_seed(
         from ..constraints import torque_constraints
 
         cons += torque_constraints(data.torque, a, b)
+    # 速度相关力矩（t–n 梯形包络）：√a 在速度上界 a_bar 处线性化（种子 max∫a 工作点≈a_bar，
+    # 切线在此处紧、且随后 SPLP 迭代在各自 a_lin 处重线性化），保持可行性一致（Theorem 2）
+    if flags.speed_torque and data.speed_torque is not None:
+        from ..constraints import speed_torque_constraints
+
+        cons += speed_torque_constraints(data.speed_torque, data.dq, a, b, a_bar, num_stat=num_stat)
 
     prob = cp.Problem(cp.Maximize(w @ a), cons)
     status = solve_problem(prob)

@@ -243,13 +243,17 @@ class UR5RobotModel:
     # UR5 常见非奇异"家位姿"（肘部弯曲，避免落在肩/肘完全伸直的奇异位形）
     _HOME = np.array([0.0, -np.pi / 2, np.pi / 2, -np.pi / 2, -np.pi / 2, 0.0])
 
+    # 合成路径速度尺度（不代表真实 UR5；越大关节转得越快，用于让 t–n 的高速 rolloff 段被激活）
+    path_amp_scale: float = 1.0
+    path_freq: tuple = (1.0, 2.0)
+
     # ── 运动学：合成关节路径（lowering/IK 落地前的占位） ─────────────────
     def joint_path(self, s: np.ndarray):
         """返回 (q0, q1, q2, q3)，各 (6, N)：q(s) 及其 1/2/3 阶导。"""
         rng = np.random.default_rng(self.seed)
-        amp = 0.15 * np.pi  # 幅值取关节全量程一小部分，避免大幅摆动触及奇异位形
+        amp = 0.15 * np.pi * self.path_amp_scale  # 幅值（默认取关节全量程一小部分，避奇异）
         A = rng.uniform(0.5, 1.0, self.n_axis) * amp
-        w = rng.uniform(1.0, 2.0, self.n_axis)
+        w = rng.uniform(self.path_freq[0], self.path_freq[1], self.n_axis)
         phi = rng.uniform(0.0, 2.0 * np.pi, self.n_axis)
         th = w[:, None] * s[None, :] + phi[:, None]
         q0 = self._HOME[:, None] + A[:, None] * np.sin(th)

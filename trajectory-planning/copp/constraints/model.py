@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 
-from ..types import Topp3Data, TcpConstraint, TorqueConstraint
+from ..types import Topp3Data, TcpConstraint, TorqueConstraint, SpeedTorqueConstraint
 
 Scalar = float
 Limit = "float | np.ndarray"
@@ -48,6 +48,12 @@ class RobotLimits:
     w_tcp_max: float | None = None
     tau_max: Limit | None = None          # M4：关节力矩上界
     tau_min: Limit | None = None          # M4：关节力矩下界（缺省取 -tau_max）
+    # 速度相关力矩（t–n 梯形包络 + 粘滞/库仑摩擦）物理参数；逐关节标量或 (n,) 数组
+    st_tau0: Limit | None = None          # 平台/堵转力矩 τ0（缺省取 tau_max）
+    st_noload_speed: Limit | None = None  # 空载转速 ω0（力矩→0；启用 t–n 时的轴速上限）
+    st_viscous: Limit | None = None       # 粘滞摩擦系数 Fv
+    st_coulomb: Limit | None = None       # 库仑摩擦力矩 Fc
+    # 拐点 ω_c 缺省取各轴 vmax（见 to_topp3_data）
 
     @classmethod
     def from_ratios(
@@ -91,7 +97,8 @@ class RobotLimits:
         """结合路径几何（q', q'', q'''）构造 Topp3Data。
 
         tcp_geom     : {"cv": (N,), "cw": (N,)}，配合 v_tcp_max/w_tcp_max 生成 TCP 约束。
-        torque_coeffs: {"n_tor":(n,N), "m_tor":(n,N), "g_tor":(n,N)}，配合 tau_max/min 生成力矩约束。
+        torque_coeffs: {"n_tor":(n,N), "m_tor":(n,N), "g_tor":(n,N)}，无摩擦动力学力矩系数；
+                       配合 tau_max/min 生成恒定盒式力矩约束，配合 st_* 生成速度相关（t–n）约束。
         """
         n = dq.shape[0]
         vmax, amax, jmax = self.axis_arrays(n)
@@ -115,11 +122,26 @@ class RobotLimits:
                 tau_max=tau_max, tau_min=tau_min,
             )
 
+        speed_torque = None
+        if torque_coeffs is not None and self.st_noload_speed is not None:
+            n_tor = np.asarray(torque_coeffs["n_tor"], float)
+            m_tor = np.asarray(torque_coeffs["m_tor"], float)
+            g_tor = np.asarray(torque_coeffs["g_tor"], float)
+            tau0 = _as_axis(self.st_tau0 if self.st_tau0 is not None else self.tau_max, n)
+            speed_torque = SpeedTorqueConstraint(
+                n_tor=n_tor, m_tor=m_tor, g_tor=g_tor,
+                tau0=tau0,
+                rated_speed=vmax.copy(),                    # 拐点 ω_c 取各轴 vmax
+                noload_speed=_as_axis(self.st_noload_speed, n),
+                viscous=_as_axis(self.st_viscous if self.st_viscous is not None else 0.0, n),
+                coulomb=_as_axis(self.st_coulomb if self.st_coulomb is not None else 0.0, n),
+            )
+
         data = Topp3Data(
             s_grid=s_grid, dq=dq, ddq=ddq, dddq=dddq,
             vmax=vmax, amax=amax, jmax=jmax,
             a_bnd=self.a_bnd, b_bnd=self.b_bnd,
-            tcp=tcp, torque=torque,
+            tcp=tcp, torque=torque, speed_torque=speed_torque,
         )
         if validate:
             data.validate()

@@ -5,6 +5,12 @@
 """
 
 from .model import RobotLimits
-from .ingest import tcp_a_upper_bound, torque_constraints
+from .ingest import (
+    tcp_a_upper_bound, torque_constraints,
+    speed_torque_constraints, speed_torque_utilization, speed_torque_envelope,
+)
 
-__all__ = ["RobotLimits", "tcp_a_upper_bound", "torque_constraints"]
+__all__ = [
+    "RobotLimits", "tcp_a_upper_bound", "torque_constraints",
+    "speed_torque_constraints", "speed_torque_utilization", "speed_torque_envelope",
+]

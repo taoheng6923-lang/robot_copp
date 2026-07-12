@@ -7,6 +7,8 @@
 > 本文档聚焦论文的**核心贡献**：如何把电机的**转矩–转速（torque–speed，简称 t–n）约束**——一种随关节速度变化的力矩上限——**加入时间最优路径跟踪的凸优化里而不破坏凸性**。按用户要求，只梳理论文思路与数学，不涉及代码与软件架构。
 >
 > ⚠️ **符号提醒**：本论文用 $b=\dot s^2$、$a=\ddot s$（速度平方是 $b$，加速度是 $a$），与本仓库 [`docs/paper_notes.md`](./paper_notes.md)（Wang/Hu 论文，$a=\dot u^2$、$b=\ddot u$）**恰好相反**。本文档一律采用**本论文自身**的记号。
+>
+> 🛠 **代码落地**：本文思路已在 copp 内核实现（`types.SpeedTorqueConstraint` + `constraints/ingest.speed_torque_constraints` + `ConstraintFlags.speed_torque`），含粘滞/库仑摩擦（§8）。**注意投影域记号切换**：仓库代码沿用 [`docs/paper_notes.md`](./paper_notes.md) 的 $a=\dot s^2$、$b=\ddot s$（与本文相反），故实现中 $\dot q^2=q'^2\,a$（本文的 $b$）；√a 的非凸性按 SPLP 在 $a_{\text{lin}}$ 处切线线性化。落地说明见 [`docs/README_M1.md`](README_M1.md) 的"速度相关力矩（t–n）约束"节；自检并入唯一用例 `trajectory-planning/copp/self-test/test_copp.py`（物理参数 κ/Fv/Fc 逐关节在 `configs/robot_ur5.yaml`，约束开关在 `configs/comm_paras.yaml`，出图 `output/speed_torque_test.png`）。
 
 ---
 
@@ -22,6 +24,7 @@
 8. [扩展：粘滞与库仑摩擦并入 t–n 约束](#8-扩展粘滞与库仑摩擦并入-tn-约束)
 9. [数值实验结论](#9-数值实验结论)
 10. [方法要点总结](#10-方法要点总结)
+11. [在本项目 copp 的落地实现](#11-在本项目-copp-的落地实现)
 
 ---
 
@@ -348,6 +351,37 @@ $$
 6. **求解**：并入 Verscheure 的 SOCP（式 43），结构相容、仍高效；对旋转/平移关节通用，且与多目标框架不冲突。
 
 **一句话**：**"仿射于 $\dot q^2$（而非 $\dot q$）"** 是让速度相关力矩约束保凸的钥匙；代价是对真实非凸可行域做一次保守的仿射内逼近。
+
+---
+
+## 11. 在本项目 copp 的落地实现
+
+本节把上文理论对应到仓库代码（`trajectory-planning/copp/`）。**注意记号差异**：本项目内核用
+$a=\dot s^2$、$b=\ddot s$（与本文 Ardeshiri 记号 $b=\dot s^2$ **相反**），故关节速度平方
+$\dot q_i^2=\mathbf q_i'^2\,a$ **线性于状态 $a$**（本文的角色由 $b$ 承担）。
+
+**建模选择**：把可用力矩取为真实电机数据表的**梯形** t–n 特性（低速平台 $\tau_0$ 到拐点
+$\omega_c$，高速线性收窄到 $\omega_0$ 处为 0），而非本文示例的纯线性包络——两者思路一致，
+梯形更贴近数据表。摩擦按 §8 并入：粘滞 $F_v$ 进 $\sqrt a$ 系数、库仑 $F_c$ 进截距。
+
+**凸化两步**（`constraints/ingest.py: speed_torque_constraints`）：
+
+1. **梯形 = 两个 halfplane 的交（精确）**：$\tau_\text{env}=\min(\tau_0,\ E_\text{roll}-s_\text{roll}|\dot q|)$，
+   故对每个网格点**同时**施加平台约束与 rolloff 约束——无需在 $\dot q^2$ 平面对梯形做多切角逼近。
+2. **唯一凹项 $\sqrt a$ 在 SCP 迭代点 $a_\text{lin}$ 处线性化**：本内核走 **LP**（无 $\sqrt a$ 变量），
+   故不像本文式(43) 的 SOCP 那样能精确表示 $\sqrt a$，改用与 jerk 同源的序列线性化——逐点按
+   $\sqrt a$ 系数正负取**切线上界**（$\ge0$）或**过原点割线下界**（$<0$），二者都收紧（保守，
+   不违反真实梯形），收敛处相切即精确。切点随 $a_\text{lin}\to$ 工作点，**静止端无固定切点的
+   伪速度项**，故高重力关节（UR5 肩 $g\approx140$、$\tau_0=150$）亦可行。
+
+> 若内核改走 SOCP（`copp` 预留 `mode='socp'`），$\sqrt a$ 可作锥变量精确表示，则本约束
+> 无需 SCP 线性化，退化为本文式(43) 的精确形式——两条路线在此自洽。
+
+**配置与验证**：物理参数（$\omega_0$/$F_v$/$F_c$，$\tau_0$ 复用 `tau_max`、$\omega_c$ 复用 `vmax`）
+逐关节写在 [`configs/robot_ur5.yaml`](robot_ur5.yaml)，开关 `speed_torque` 在 `comm_paras.yaml`；
+自测 `test_copp` 用求得 $(a,b)$ 回代**真实梯形**核对利用率 $\le1$ 且绑定。对照实验：
+关掉 t–n 时真实利用率高达 ~11.5（必超限），带 t–n 时收敛处 util≈1.0000（保守且贴边）。
+落地细节见 [`docs/README_M1.md`](README_M1.md) 的"速度相关力矩（t–n）约束"一节。
 
 ---
 
