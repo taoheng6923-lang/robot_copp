@@ -6,6 +6,10 @@ build/
 dist/
 .pytest_cache/
 
+# 虚拟环境：内含本机绝对路径（pyvenv.cfg / Scripts/*.exe / *.pth）与平台相关二进制，
+# 换机器甚至换目录都不可用。新环境按 CLAUDE.md 用 pyproject.toml 重建，勿提交。
+.venv/
+
 # 生成的图（运行各 self-test 自动重建）
 trajectory-planning/copp/self-test/output/
 trajectory-planning/path/self-test/output/
