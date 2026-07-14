@@ -188,7 +188,7 @@ def test_copp():
 
     # 图 1：SPLP 概览
     out1 = os.path.join(out_dir, "splp_test.png")
-    fig1 = plot_splp_result(data, profile, hist, save_path=out1, show=False)
+    fig1 = plot_splp_result(data, profile, hist, flags=flags, save_path=out1, show=False)
     assert os.path.exists(out1) and os.path.getsize(out1) > 0
     plt.close(fig1)
 

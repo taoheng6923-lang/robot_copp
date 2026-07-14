@@ -101,16 +101,62 @@ def _interp_to_time(s_grid, s_of_t, signal_over_s):
     return np.interp(s_of_t, s_grid, signal_over_s)
 
 
+def constraint_utilizations(data: Topp3Data, profile: Profile, flags=None) -> dict:
+    """逐约束的利用率曲线（|·|/上限，沿 s 网格），**只含 flags 启用者**。
+
+    返回 {标签: (N,)}，覆盖全部七类约束；=1 即该约束在此处绑定。被开关关闭的约束
+    不出现在结果里（它们不参与求解，画出来只会误导——看着"超限"其实是没施加）。
+
+    注意速度一项的分母：启用 t–n 时轴速上界是空载转速 ω0 而非 vmax（与
+    solve/state.velocity_upper_bound 一致），否则会把合法的高速误算成超限。
+    """
+    from .options import ConstraintFlags
+
+    flags = flags or ConstraintFlags()
+    a, b = profile.a, profile.b
+    sa = np.sqrt(np.maximum(a, 0.0))
+    sig = reconstruct_grid_signals(data, profile)
+    out: dict[str, np.ndarray] = {}
+
+    if flags.velocity:
+        vcap = (data.speed_torque.noload_speed
+                if (flags.speed_torque and data.speed_torque is not None) else data.vmax)
+        out["速度"] = np.max(np.abs(sig["qd"]) / vcap[:, None], axis=0)
+    if flags.acceleration:
+        out["加速度"] = np.max(np.abs(sig["qdd"]) / data.amax[:, None], axis=0)
+    if flags.jerk:
+        out["jerk"] = np.max(np.abs(sig["qddd"]) / data.jmax[:, None], axis=0)
+    if flags.torque and data.torque is not None:
+        tq = data.torque
+        tau = tq.n_tor * a + tq.m_tor * b + tq.g_tor
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # 双边盒式：τ>0 归一到 tau_max、τ<0 归一到 tau_min（<0，故商为正），取较紧者
+            ratio = np.maximum(tau / tq.tau_max[:, None], tau / tq.tau_min[:, None])
+        out["力矩（盒式）"] = np.max(np.nan_to_num(ratio, nan=0.0, posinf=0.0), axis=0)
+    if flags.speed_torque and data.speed_torque is not None:
+        out["力矩（t–n）"] = speed_torque_signals(data, profile)["util"].max(axis=0)
+    if flags.tcp_velocity and data.tcp is not None:
+        out["TCP 线速度"] = data.tcp.cv * sa / data.tcp.v_max
+    if flags.tcp_angular_velocity and data.tcp is not None:
+        out["TCP 角速度"] = data.tcp.cw * sa / data.tcp.w_max
+    return out
+
+
 def plot_splp_result(
     data: Topp3Data,
     profile: Profile,
     hist=None,
     dt: float = 1e-3,
+    flags=None,
     save_path: str | None = None,
     show: bool = False,
     title: str = "TOTP-SPLP（M1）求解结果",
 ):
-    """SPLP 结果概览图（2×3）。返回 matplotlib Figure。"""
+    """SPLP 结果概览图（2×3）。返回 matplotlib Figure。
+
+    flags : ConstraintFlags；决定面板 ④ 画哪些约束的利用率、以及面板 ② 的速度上界
+            按哪些约束合成。None 则视为全部启用。
+    """
     import matplotlib
 
     if not show:
@@ -118,9 +164,12 @@ def plot_splp_result(
     _set_cjk_font()
     import matplotlib.pyplot as plt
 
+    from .options import ConstraintFlags
+
+    flags = flags or ConstraintFlags()
     s = data.s_grid
     sig = reconstruct_grid_signals(data, profile)
-    a_bar = velocity_upper_bound(data)
+    a_bar = velocity_upper_bound(data, flags)   # 上界也只由启用的速度类约束合成
     t_uniform, s_of_t = t_to_s(s, profile, dt)
 
     fig, ax = plt.subplots(2, 3, figsize=(15, 8))
@@ -149,16 +198,20 @@ def plot_splp_result(
     ax[0, 2].set_xlabel("路径参数 $s$"); ax[0, 2].set_ylabel(r"$b=\ddot s$")
     ax[0, 2].set_title("③ 路径加速度")
 
-    # ④ 约束利用率 vs s
-    r_v = np.max(np.abs(sig["qd"]) / data.vmax[:, None], axis=0)
-    r_a = np.max(np.abs(sig["qdd"]) / data.amax[:, None], axis=0)
-    r_j = np.max(np.abs(sig["qddd"]) / data.jmax[:, None], axis=0)
-    ax[1, 0].plot(s, r_v, label="速度"); ax[1, 0].plot(s, r_a, label="加速度")
-    ax[1, 0].plot(s, r_j, label="jerk")
-    ax[1, 0].axhline(1.0, ls="--", color="0.5")
+    # ④ 约束利用率 vs s —— 只画 flags 启用的约束（关闭者不参与求解，画出来会误导）
+    utils = constraint_utilizations(data, profile, flags)
+    if utils:
+        for k, (name, r) in enumerate(utils.items()):
+            ax[1, 0].plot(s, r, color=f"C{k}", label=name)
+        ax[1, 0].axhline(1.0, ls="--", color="0.5")
+        top = max(1.15, 1.05 * max(float(np.max(r)) for r in utils.values()))
+        ax[1, 0].set_ylim(0, top)   # 自适应，避免贴边曲线被裁掉看不见
+        ax[1, 0].legend(fontsize=8, ncol=2)
+    else:
+        ax[1, 0].text(0.5, 0.5, "无启用的约束", ha="center", va="center",
+                      transform=ax[1, 0].transAxes, color="0.5")
     ax[1, 0].set_xlabel("路径参数 $s$"); ax[1, 0].set_ylabel("利用率 (|·|/上限)")
-    ax[1, 0].set_title("④ 约束利用率"); ax[1, 0].legend(fontsize=9)
-    ax[1, 0].set_ylim(0, 1.15)
+    ax[1, 0].set_title(f"④ 约束利用率（仅启用者：{len(utils)}/7）")
 
     # ⑤ 时间律 s(t)
     ax[1, 1].plot(t_uniform, s_of_t, color="C2")
