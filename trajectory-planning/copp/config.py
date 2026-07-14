@@ -34,6 +34,14 @@ def _joint_field(joints: list[dict], key: str, required: bool = True):
     return np.asarray([float(j[key]) for j in joints], dtype=float)
 
 
+def _scale(cfg: dict, key: str) -> float:
+    """读顶层倍率字段（实验旋钮，逐类独立；缺省 1.0，须为正）。"""
+    val = float(cfg.get(key, 1.0))
+    if val <= 0:
+        raise ValueError(f"{key} 须为正，得到 {val}")
+    return val
+
+
 def load_robot_limits(
     path: str | os.PathLike | None = None,
     v_tcp_max: float | None = 0.6,
@@ -45,11 +53,18 @@ def load_robot_limits(
     v_tcp_max : TCP 位置速度模上界（给定，不在配置文件里）。None 表示不设。
     w_tcp_max : TCP 姿态角速度模上界（给定）。None 表示不设。
 
-    读取字段：顶层 {n_axis?,tau_scale?}、joints[].{vmax,amax,jmax,tau_max?,tau_min?,noload_speed?,
-    viscous?,coulomb?}、boundary.{a_bnd,b_bnd}。tau_min 缺省取 -tau_max；力矩字段整体可缺（则不启用
-    力矩上下界）。tau_scale（缺省 1.0）统一缩放 tau_max/tau_min（及复用 tau_max 的 t–n 平台 τ0）。
+    读取字段：顶层 {n_axis?,vmax_scale?,amax_scale?,jmax_scale?,tau_scale?}、
+    joints[].{vmax,amax,jmax,tau_max?,tau_min?,noload_speed?,viscous?,coulomb?}、
+    boundary.{a_bnd,b_bnd}。tau_min 缺省取 -tau_max；力矩字段整体可缺（则不启用力矩上下界）。
     noload_speed（空载转速 ω0）给全才启用速度相关力矩（t–n）：τ0 复用 tau_max、拐点 ω_c 取 vmax、
     viscous/coulomb 缺省 0。
+
+    四个 *_scale 倍率（缺省 1.0，须为正）是**各自独立**的实验旋钮，只缩放本类限值：
+      vmax_scale → vmax（同时即 t–n 拐点 ω_c；**不**缩放 ω0/摩擦，故须 vmax_scale < min(ω0/vmax)）
+      amax_scale → amax；jmax_scale → jmax（无耦合）
+      tau_scale  → tau_max/tau_min（及复用 tau_max 的 t–n 平台 τ0）
+    注意：t–n 启用时轴速上界取 ω0 而非 vmax（见 solve/state.velocity_upper_bound），
+    此时 vmax_scale 只移动梯形拐点、并不放开速度上限——要放开速度须改 noload_speed。
     """
     import yaml
 
@@ -63,15 +78,15 @@ def load_robot_limits(
     if "n_axis" in cfg and int(cfg["n_axis"]) != len(joints):
         raise ValueError(f"n_axis={cfg['n_axis']} 与 joints 数 {len(joints)} 不符")
 
-    vmax = _joint_field(joints, "vmax")
-    amax = _joint_field(joints, "amax")
-    jmax = _joint_field(joints, "jmax")
+    # 顶层倍率（各类独立的实验旋钮，缺省 1.0）：只缩放本类限值，互不牵连。
+    vmax_raw = _joint_field(joints, "vmax")
+    vmax_scale = _scale(cfg, "vmax_scale")
+    vmax = vmax_raw * vmax_scale
+    amax = _joint_field(joints, "amax") * _scale(cfg, "amax_scale")
+    jmax = _joint_field(joints, "jmax") * _scale(cfg, "jmax_scale")
     tau_max = _joint_field(joints, "tau_max", required=False)
     tau_min = _joint_field(joints, "tau_min", required=False)
-    # 顶层力矩倍率 tau_scale：统一乘 tau_max（及 t–n 平台 τ0）与 tau_min（实验用；缺省 1.0）
-    tau_scale = float(cfg.get("tau_scale", 1.0))
-    if tau_scale <= 0:
-        raise ValueError(f"tau_scale 须为正，得到 {tau_scale}")
+    tau_scale = _scale(cfg, "tau_scale")  # 统一乘 tau_max（及复用它的 t–n 平台 τ0）与 tau_min
     if tau_max is not None:
         tau_max = tau_max * tau_scale
         tau_min = -tau_max if tau_min is None else tau_min * tau_scale  # 缺省对称，否则同步缩放
@@ -79,6 +94,17 @@ def load_robot_limits(
     noload_speed = _joint_field(joints, "noload_speed", required=False)
     viscous = _joint_field(joints, "viscous", required=False)
     coulomb = _joint_field(joints, "coulomb", required=False)
+    # vmax_scale 不缩放 ω0（用户约定），故放大 vmax 会把 t–n 拐点 ω_c(=vmax) 推向/推过 ω0。
+    # 梯形要求 ω_c < ω0（types.Topp3Data.validate），此处提前拦下并给出可用上限。
+    if noload_speed is not None and np.any(vmax >= noload_speed):
+        i = int(np.argmax(vmax / noload_speed))
+        cap = float(np.min(noload_speed / vmax_raw))
+        raise ValueError(
+            f"vmax_scale={vmax_scale:g} 过大：关节 '{joints[i].get('name', i)}' 缩放后 "
+            f"vmax={vmax[i]:.4g} ≥ 空载转速 ω0={noload_speed[i]:.4g}，而 t–n 梯形要求拐点 "
+            f"ω_c(=vmax) < ω0。请把 vmax_scale 降到 < {cap:.4g}，或调大各关节 noload_speed。"
+            f"（注意 vmax_scale 只缩放 vmax/ω_c；t–n 启用时轴速上界取 ω0，不受 vmax_scale 影响）"
+        )
 
     bnd = cfg.get("boundary", {}) or {}
     a_bnd = tuple(float(x) for x in bnd.get("a_bnd", (0.0, 0.0)))

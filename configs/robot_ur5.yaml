@@ -8,11 +8,10 @@
 #       |q̇_i| ≤ vmax_i, |q̈_i| ≤ amax_i, |q⃛_i| ≤ jmax_i, tau_min_i ≤ τ_i ≤ tau_max_i
 #   - 单位：位置 rad，故 vmax[rad/s]、amax[rad/s²]、jmax[rad/s³]、tau[N·m]。
 #
-# 数据来源（准确度分三档，逐条标注，勿混为同一可信度）：
+# 数据来源（准确度分三档，逐条标注，勿混为同一可信度）。下方 joints 表内均为下述来源的**原值**，
+# 顶层 vmax_scale/amax_scale/jmax_scale/tau_scale 倍率在加载时另行缩放（见"顶层倍率"节）：
 #   - tau_max：Universal Robots 官网 "Max. joint torques CB3 and e-Series"
-#     —— **官方权威**：base 54, shoulder 150, elbow 150, wrist1/2 28, wrist3 9 Nm（下方 joints 即官方值）。
-#     顶层 `tau_scale` 对所有关节 tau_max（及复用它的 t–n 平台 τ0、对称下界 tau_min）统一乘倍——
-#     实验用，放开力矩余量、观察进给能否 ramp 到 rolloff 段；tau_scale=1 即官方值。
+#     —— **官方权威**：base 54, shoulder 150, elbow 150, wrist1/2 28, wrist3 9 Nm。
 #   - vmax：ROS-Industrial `universal_robot` 仓库 `ur5.urdf.xacro` 的
 #     `<limit velocity=.../>` —— **社区维护、驱动真实 UR5 硬件的描述文件**
 #     （可信但非 UR 官方数据表原文）：base/shoulder/elbow 3.15 rad/s，
@@ -33,9 +32,23 @@
 name: ur5
 n_axis: 6
 
-# 力矩倍率：对所有关节 tau_max（及复用它的 t–n 平台 τ0、对称下界 tau_min）统一乘此系数。
-#   实验用（放开力矩余量看效果）——1.0=官方值；缺省 1.0。仅缩放力矩，不动 vmax/摩擦/ω0。
-tau_scale: 5.0
+# 顶层倍率：四个**各自独立**的实验旋钮，各只缩放本类限值（缺省 1.0=表内原值，须为正）。
+#   经 config.load_robot_limits 统一施加；joints 表内保持原始/官方值不动，改倍率即可扫参数。
+#
+#   tau_scale  → 所有关节 tau_max（及复用它的 t–n 平台 τ0、对称下界 tau_min）。不动 vmax/摩擦/ω0。
+#   amax_scale → 所有关节 amax。   jmax_scale → 所有关节 jmax。二者无耦合，纯粹放松/收紧该限值。
+#   vmax_scale → 所有关节 vmax。**有耦合，用前先读**：vmax 同时是 t–n 梯形的拐点 ω_c，
+#     而本旋钮按约定**不**缩放空载转速 ω0（noload_speed）。两个后果：
+#       1) 启用 t–n 时（comm_paras.yaml 的 constraints.speed_torque=true，当前即是），
+#          轴速上界取的是 ω0 而非 vmax —— 此时 vmax_scale 只把梯形的恒力矩平台拉长/缩短
+#          （拐点右移/左移），**并不放开速度上限**。要放开速度须直接调各关节 noload_speed。
+#       2) 须保证缩放后 ω_c < ω0，即 vmax_scale < min_i(ω0_i/vmax_i)＝1.6（本表 ω0=1.6·vmax）；
+#          超出会被 load_robot_limits 提前拦下并报出可用上限（而非撞进底层断言）。
+#     关闭 t–n 时 vmax 才是纯粹的轴速上限，vmax_scale 也才是纯粹的"速度倍率"（且无 1.6 上限）。
+vmax_scale: 1.0
+amax_scale: 1.0
+jmax_scale: 1.0
+tau_scale: 10.0
 
 # 路径两端 a=ṡ²、b=s̈ 边界。
 #   a_bnd=(0,0) 即 rest-to-rest（首末速度严格为 0）；零进给奇异由 Prop.2 静止段
