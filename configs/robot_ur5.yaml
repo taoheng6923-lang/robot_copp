@@ -47,7 +47,7 @@ n_axis: 6
 #     关闭 t–n 时 vmax 才是纯粹的轴速上限，vmax_scale 也才是纯粹的"速度倍率"（且无 1.6 上限）。
 vmax_scale: 1.0
 amax_scale: 1.0
-jmax_scale: 1.0
+jmax_scale: 0.5
 tau_scale: 10.0
 
 # 路径两端 a=ṡ²、b=s̈ 边界。

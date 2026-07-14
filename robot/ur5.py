@@ -251,7 +251,7 @@ class UR5RobotModel:
     def joint_path(self, s: np.ndarray):
         """返回 (q0, q1, q2, q3)，各 (6, N)：q(s) 及其 1/2/3 阶导。"""
         rng = np.random.default_rng(self.seed)
-        amp = 0.15 * np.pi * self.path_amp_scale  # 幅值（默认取关节全量程一小部分，避奇异）
+        amp = 0.5 * np.pi * self.path_amp_scale  # 幅值（默认取关节全量程一小部分，避奇异）
         A = rng.uniform(0.5, 1.0, self.n_axis) * amp
         w = rng.uniform(self.path_freq[0], self.path_freq[1], self.n_axis)
         phi = rng.uniform(0.0, 2.0 * np.pi, self.n_axis)

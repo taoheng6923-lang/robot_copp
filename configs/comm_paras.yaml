@@ -19,7 +19,7 @@ objective:
   # 非静止（c-ZOH）段相邻 c 控制跳变的平滑惩罚权重 λ：目标 += λ·Σ|c_i−c_{i+1}|。
   #   经 LP 不等式 p_i≥|c_i−c_{i+1}| 实现；仅作用于非零速段（静止段用 jerk-ZOH，c 发散不参与）。
   #   λ 应为**小系数**，使平滑项不主导时间最优目标；0 关闭。经 load_smooth_c_weight() 读入。
-  smooth_c_weight: 0.005
+  smooth_c_weight: 0.02
 
 # 注：论文 Fig.4（区间解析插值）现由**唯一测试用例**的求解结果直接重构出图
 # （viz.plot_interp_profiles(data, profile)），不再单独造示意数据/参数节。
