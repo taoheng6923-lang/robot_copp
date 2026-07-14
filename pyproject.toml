@@ -6,7 +6,9 @@ build-backend = "hatchling.build"
 name = "robot_copp"
 version = "0.1.0"
 description = "基于 copp 算法（TOTP-SPLP）的机器人时间最优轨迹规划模块"
-requires-python = ">=3.10"
+# 上界 <3.13：numpy<2（见下）在 3.13 上无 cp313 轮子，pip 会退化为源码编译并失败；
+# 钉上界后 pip 直接报 "Requires-Python" 版本不匹配，而不是抛一堆难懂的编译错误。
+requires-python = ">=3.10,<3.13"
 dependencies = [
     "numpy>=1.26,<2.0",   # cvxpy/qdldl/osqp 的 Win 二进制轮子在 numpy>=2 下会段错误崩溃
     "scipy>=1.11",
