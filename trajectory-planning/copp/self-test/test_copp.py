@@ -1,14 +1,18 @@
 """copp 数值内核端到端测试（framework §8）。
 
 **唯一测试用例** test_copp：一次求解得 (data, profile)，全部断言 + 由**同一求解结果**输出五张
-分析图——output/ 下所有图像均来自该唯一用例，不另造示意数据：
+分析图与一段三维仿真回放——output/ 下所有产物均来自该唯一用例，不另造示意数据：
   output/splp_test.png               —— SPLP 概览（收敛 / 速度剖面 / 约束利用率 / 时间律…）
   output/splp_limits_test.png        —— 关节速度/加速度/jerk/力矩 + TCP 速度模（带约束）
   output/speed_torque_test.png       —— 速度相关力矩（t–n）：转矩–转速包络 / 利用率 / 摩擦分量
   output/tn_convexification_test.png —— 论文 Fig.3：逐关节 (q̇²,τ) 真实非凸域 vs 仿射切角内逼近
   output/fig4_interpolation.png      —— 论文 Fig.4 风格：本用例轨迹全程 a/b/c/参数jerk 解析重构
+  output/robot_motion_3d.gif         —— 三维仿真回放：由本用例时间律重建 q(t) 后播放机器人运动
 
-可用 pytest 运行，也可直接 `python trajectory-planning/copp/self-test/test_copp.py`。
+运行方式：
+  pytest -q                                              # 只导出上述产物（不弹窗）
+  python trajectory-planning/copp/self-test/test_copp.py # 额外弹窗交互播放 3D 动画（可旋转视角）
+  python .../test_copp.py --no-anim                      # 同上但不弹窗，只导出 GIF
 """
 
 from __future__ import annotations
@@ -36,6 +40,10 @@ from limits_config import LIMITS as _LIMITS
 # 机器人运动学/动力学计算集中于 UR5RobotModel（真实 UR5 DH 运动学 + 对角近似动力学）
 _MODEL = UR5RobotModel(seed=3)
 
+# 3D 仿真回放是否弹窗交互播放：pytest 下必须为 False（plt.show 会阻塞），
+# 直接 `python test_copp.py` 运行时在 __main__ 里置 True（见文件末尾）。GIF 两种情形都导出。
+_SHOW_ANIM = False
+
 
 def _make_data(n_grid=81) -> Topp3Data:
     """合成数据（M4：TCP 速度模 + 关节力矩），本体量全部来自 UR5RobotModel。"""
@@ -51,6 +59,22 @@ def _make_data(n_grid=81) -> Topp3Data:
 def _viz_tcp(s):
     """viz.plot_kinematic_limits 用的 TCP dict：几何 {dp,wdir} + 给定上界 v_max/w_max。"""
     return {**_MODEL.tcp_geometry(s), "v_max": _LIMITS.v_tcp_max, "w_max": _LIMITS.w_tcp_max}
+
+
+def _joint_trajectory_in_time(data, profile, n_frames: int = 75):
+    """由**同一求解结果**重建等时间栅格上的关节轨迹 q(t)，供 3D 仿真回放。
+
+    求解给出的是路径域时间律：s_to_t → 各网格点 s_k 的到达时刻 t_k。回放需要等时间
+    采样，故反过来插值 t→s，再用解析的 joint_path(s) 精确求值 q（q(s) 对任意 s 闭式
+    可求，故 q 无插值误差；仅 s(t) 用 (t_k,s_k) 表做线性插值，对可视化足够）。
+
+    返回 (q_t (6,n_frames), t_grid (n_frames,))。
+    """
+    t_final, t_s = s_to_t(data.s_grid, profile)
+    t_grid = np.linspace(0.0, t_final, n_frames)
+    s_at_t = np.interp(t_grid, t_s, data.s_grid)   # 时间 → 路径参数（单调，可逆）
+    q_t, _, _, _ = _MODEL.joint_path(s_at_t)       # 解析求值，无网格插值误差
+    return q_t, t_grid
 
 
 def _assert_solver(data, profile, hist, flags=ConstraintFlags()):
@@ -194,7 +218,22 @@ def test_copp():
     assert os.path.exists(out4) and os.path.getsize(out4) > 0
     plt.close(fig4)
 
+    # 图 5：三维仿真回放——由同一 (data, profile) 重建 q(t) 后播放机器人运动动作。
+    #   pytest 下只导出 GIF；直接 `python test_copp.py` 运行时额外弹窗交互播放（见 __main__）。
+    from robot.sim3d import animate_joint_motion
+
+    q_t, t_grid = _joint_trajectory_in_time(data, profile)
+    out5 = os.path.join(out_dir, "robot_motion_3d.gif")
+    fig5, _anim5 = animate_joint_motion(
+        q_t, t_grid, kin=_MODEL.kin, save_path=out5, show=_SHOW_ANIM,
+        title=f"UR5 三维仿真回放（t_final = {t_grid[-1]:.3f} s）",
+    )
+    assert os.path.exists(out5) and os.path.getsize(out5) > 0
+    plt.close(fig5)
+
 
 if __name__ == "__main__":
+    # 直接运行时弹窗播放 3D 仿真（可拖拽旋转视角）；`--no-anim` 只导出 GIF 不弹窗。
+    _SHOW_ANIM = "--no-anim" not in sys.argv
     test_copp()
     print("PASS test_copp")
