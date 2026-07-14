@@ -74,7 +74,12 @@ def _assert_solver(data, profile, hist, flags=ConstraintFlags()):
     qd, qdd, qddd = sig["qd"], sig["qdd"], sig["qddd"]
     binders = []
     if flags.velocity:
-        r_v = np.max(np.abs(qd) / data.vmax[:, None]); assert r_v <= 1.02, r_v
+        # 轴速上界：启用 t–n 时取空载转速 ω0（=noload_speed），否则取 vmax——
+        # 与求解端 solve/state.velocity_upper_bound 一致。此前死用 vmax，仅因 jerk
+        # 约束恰好把速度压在 vmax 内而未暴露；关掉 jerk 后速度顶到 ω0 即误报越界。
+        vcap = (data.speed_torque.noload_speed
+                if (flags.speed_torque and data.speed_torque is not None) else data.vmax)
+        r_v = np.max(np.abs(qd) / vcap[:, None]); assert r_v <= 1.02, r_v
     if flags.acceleration:
         r_a = np.max(np.abs(qdd) / data.amax[:, None]); assert r_a <= 1.02, r_a; binders.append(r_a)
     if flags.jerk:
